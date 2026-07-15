@@ -1,0 +1,1962 @@
+workflows:
+  build-from-zip:
+    name: Build Android + iOS from ZIP
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: Gdzie z dzieckiem API
+    environment:
+      node: 22
+      xcode: latest
+      cocoapods: default
+      java: 21
+      android_signing:
+      - gzd_android_keystore
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: eu.gdziezdzieckiem.stage
+      vars:
+        ZIP_FILE: stage-gzd-capacitor-v2.9.0.zip
+        APP_DIR: gzd_app
+        ANDROID_VERSION_NAME: 2.9.0
+        IOS_VERSION_NAME: 2.9.0
+        XCODE_WORKSPACE: ios/App/App.xcworkspace
+        XCODE_SCHEME: App
+        BUNDLE_ID: eu.gdziezdzieckiem.stage
+    scripts:
+    - name: Unpack ZIP
+      script: |
+        rm -rf unzip_tmp "$APP_DIR"
+        mkdir -p unzip_tmp "$APP_DIR"
+
+        if [ ! -f "$ZIP_FILE" ]; then
+          echo "Nie znaleziono pliku ZIP: $ZIP_FILE"
+          echo "Wrzuć plik $ZIP_FILE do repozytorium obok codemagic.yaml albo zmień ZIP_FILE w vars."
+          exit 1
+        fi
+
+        unzip -q "$ZIP_FILE" -d unzip_tmp
+
+        PACKAGE_JSON=$(find unzip_tmp -maxdepth 4 -name package.json | head -n 1)
+
+        if [ -z "$PACKAGE_JSON" ]; then
+          echo "Nie znaleziono package.json w ZIP."
+          exit 1
+        fi
+
+        SOURCE_DIR=$(dirname "$PACKAGE_JSON")
+        echo "Source directory: $SOURCE_DIR"
+
+        rsync -a "$SOURCE_DIR"/ "$APP_DIR"/
+        echo "APP_DIR=$APP_DIR" >> "$CM_ENV"
+
+        echo "Zawartość katalogu aplikacji:"
+        ls -la "$APP_DIR"
+    - name: Install npm dependencies
+      script: |
+        cd "$APP_DIR"
+        npm config set registry https://registry.npmjs.org/
+        echo "Node: $(node --version)"
+        echo "npm: $(npm --version)"
+        echo "Registry: $(npm config get registry)"
+        npm ci --no-audit --no-fund --loglevel=info
+    - name: Build web assets
+      script: |
+        cd "$APP_DIR"
+        npm run build
+        npm run test:scroll-restore
+        npm run test:android-navigation
+    - name: Add native Capacitor projects if missing
+      script: |
+        cd "$APP_DIR"
+
+        if [ ! -d "android" ]; then
+          npx cap add android
+        fi
+
+        if [ ! -d "ios" ]; then
+          npx cap add ios
+        fi
+    - name: Generate native icons with macOS sips
+      script: |
+        cd "$APP_DIR"
+
+        echo "Generating Android and iOS launcher icons from bundled assets without capacitor-assets."
+        chmod +x scripts/generate-native-icons-macos.sh
+        scripts/generate-native-icons-macos.sh
+
+        ls -la assets || true
+        ls -la android/app/src/main/res/mipmap-xxxhdpi || true
+        ls -la ios/App/App/Assets.xcassets/AppIcon.appiconset || true
+    - name: Sync and patch Capacitor projects
+      script: |
+        cd "$APP_DIR"
+
+        npx cap sync android
+        npx cap sync ios
+
+        node scripts/patch-android.js
+        npm run test:generated-android
+        node scripts/patch-ios.js
+        npm run test:location
+    - name: Verify v2.9.0 fixes
+      script: |
+        cd "$APP_DIR"
+        echo "Expected app ZIP: stage-gzd-capacitor-v2.9.0.zip"
+
+        test "$(node -p "require('./package.json').version")" = "2.9.0"
+        npm run test:scroll-restore
+        npm run test:android-navigation
+        npm run test:generated-android
+        npm run test:location
+        node --check src/gzd-app-ui.js
+        node --check scripts/patch-android.js
+        node --check scripts/patch-ios.js
+
+        ANDROID_MAIN="android/app/src/main/java/eu/gdziezdzieckiem/stage/MainActivity.java"
+        ANDROID_MANIFEST="android/app/src/main/AndroidManifest.xml"
+        IOS_DELEGATE="ios/App/App/AppDelegate.swift"
+        IOS_PLIST="ios/App/App/Info.plist"
+        WEB_UI="dist/gzd-app-ui.js"
+        WEB_SCROLL="dist/gzd-scroll-restore.js"
+
+        test -s "$WEB_SCROLL"
+        grep -Fq 'android-native-v2.9.0' "$ANDROID_MAIN"
+        grep -Fq 'navigateToUrlNow(previous, false, true, commandId);' "$ANDROID_MAIN"
+        grep -Fq 'private int navigationCommandId = 0;' "$ANDROID_MAIN"
+        grep -Fq 'private boolean backNavigationInProgress = false;' "$ANDROID_MAIN"
+        grep -Fq 'private void requestBackNavigation()' "$ANDROID_MAIN"
+        grep -Fq 'if (now - lastBackActionAt < 350) return;' "$ANDROID_MAIN"
+        grep -Fq 'if (commandId != navigationCommandId) return;' "$ANDROID_MAIN"
+        grep -Fq 'boolean serverRedirect = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && request.isRedirect();' "$ANDROID_MAIN"
+        grep -Fq 'if (serverRedirect || isActiveLoadContinuation(url)) return false;' "$ANDROID_MAIN"
+        grep -Fq 'if ("about:blank".equals(url) || !isCurrentWebViewCallback(view, url)) return;' "$ANDROID_MAIN"
+        grep -Fq 'if (backNavigationInProgress || (appInitiatedLoad && "loading".equals(mode))) return;' "$ANDROID_MAIN"
+        grep -Fq 'webView.loadUrl("about:blank")' "$ANDROID_MAIN"
+        grep -Fq 'try { view.clearHistory(); }' "$ANDROID_MAIN"
+        grep -Fq 'public/gzd-scroll-restore.js' "$ANDROID_MAIN"
+        grep -Fq 'injectNavigationStateScript' "$ANDROID_MAIN"
+        if grep -Fq 'webView.goBack()' "$ANDROID_MAIN" || grep -Fq 'webView.canGoBack()' "$ANDROID_MAIN" || grep -Fq 'restoreOnNextLoad' "$ANDROID_MAIN"; then
+          echo "ERROR: Android zawiera stary mechanizm natywnego cofania WebView."
+          exit 1
+        fi
+        grep -Fq 'WindowInsets.Type.displayCutout()' "$ANDROID_MAIN"
+        grep -Fq 'createLandscapeHomeHero()' "$ANDROID_MAIN"
+        grep -Fq 'setImageFromAsset(bg, "public/hero-art.png")' "$ANDROID_MAIN"
+        grep -Fq 'TextView h = tv("Co dziś robimy\nz dzieckiem?"' "$ANDROID_MAIN"
+        grep -Fq 'TextView s = tv("Znajdź atrakcje, miejsca\ni pomysły na wspólny czas."' "$ANDROID_MAIN"
+        grep -Fq 'TextView version = tv("v2.9.0"' "$ANDROID_MAIN"
+        grep -Fq 'settings.setGeolocationEnabled(true);' "$ANDROID_MAIN"
+        grep -Fq 'onGeolocationPermissionsShowPrompt' "$ANDROID_MAIN"
+        grep -Fq 'requestPermissions(' "$ANDROID_MAIN"
+        grep -Fq 'onRequestPermissionsResult' "$ANDROID_MAIN"
+        grep -Fq 'isTrustedGeolocationOrigin' "$ANDROID_MAIN"
+        grep -Fq 'Manifest.permission.ACCESS_FINE_LOCATION' "$ANDROID_MAIN"
+        grep -Fq 'Manifest.permission.ACCESS_COARSE_LOCATION' "$ANDROID_MAIN"
+        grep -Fq 'android.permission.ACCESS_FINE_LOCATION' "$ANDROID_MANIFEST"
+        grep -Fq 'android.permission.ACCESS_COARSE_LOCATION' "$ANDROID_MANIFEST"
+
+        grep -Fq 'let performLoad =' "$IOS_DELEGATE"
+        grep -Fq 'if webView.canGoBack' "$IOS_DELEGATE"
+        grep -Fq 'self.gzdRestoringBackNavigation = true' "$IOS_DELEGATE"
+        grep -Fq -- '--gzd-native-safe-left' "$IOS_DELEGATE"
+        grep -Fq '__GZD_RESTORE_SCROLL_STATE__' "$IOS_DELEGATE"
+        swiftc -frontend -parse "$IOS_DELEGATE"
+        grep -Fq '<key>NSLocationWhenInUseUsageDescription</key>' "$IOS_PLIST"
+        grep -Fq 'Zlokalizuj mnie' "$IOS_PLIST"
+
+        grep -Fq '@media (orientation: landscape)' "$WEB_UI"
+        grep -Fq 'aspect-ratio: 1536 / 653' "$WEB_UI"
+        grep -Fq 'gzd_navigation_scroll_v2:' "$WEB_UI"
+        grep -Fq 'anchorOccurrence:' "$WEB_UI"
+        grep -Fq 'anchorIndex:' "$WEB_UI"
+        grep -Fq 'findAnchorBySavedIndex' "$WEB_UI"
+        grep -Fq 'triggerProgressiveListLoad' "$WEB_UI"
+        grep -Fq "history.scrollRestoration = 'manual'" "$WEB_UI"
+        grep -Fq '__GZD_SCROLL_RESTORE_ACTIVE__' "$WEB_UI"
+        grep -Fq 'Ładowanie...' "$WEB_UI"
+        grep -Fq '__GZD_APP_UI_V42__' "$WEB_UI"
+        grep -Fq 'gzd-hero-banner-copy' "$WEB_UI"
+        grep -Fq 'v2.9.0</div>' "$WEB_UI"
+
+        grep -Fq '__GZD_SCROLL_RESTORE_MODULE_V3__' "$WEB_SCROLL"
+        grep -Fq 'gzd_navigation_scroll_v2:' "$WEB_SCROLL"
+        grep -Fq 'anchorIndex:' "$WEB_SCROLL"
+        grep -Fq 'triggerProgressiveListLoad' "$WEB_SCROLL"
+        grep -Fq 'exactLoadMore' "$WEB_SCROLL"
+        grep -Fq "history.scrollRestoration = 'manual'" "$WEB_SCROLL"
+
+        if grep -n "TextView decoration\|👧\|👦\|🎈\|☁️" "$ANDROID_MAIN"; then
+          echo "ERROR: Wygenerowany MainActivity.java zawiera stary blok dekoracji emoji."
+          exit 1
+        fi
+
+        if grep -Fq '__GZD_APP_UI_V40__' "$WEB_UI"; then
+          echo "ERROR: Wygenerowane zasoby zawierają stary identyfikator skryptu V40."
+          exit 1
+        fi
+
+        echo "Weryfikacja poprawek v2.9.0 zakończona powodzeniem."
+    - name: Calculate automatic build numbers
+      script: |
+        cd "$APP_DIR"
+
+        AUTO_BUILD_NUMBER=$(python3 <<'PY'
+        from datetime import datetime, timezone
+
+        # Numer budowania liczony automatycznie:
+        # 1 000 000 000 + liczba minut od 2026-01-01 UTC.
+        # Jest większy od dotychczasowych numerów w Google Play
+        # i rośnie automatycznie przy kolejnych buildach.
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        print(1000000000 + int((now - base).total_seconds() // 60))
+        PY
+        )
+
+        echo "ANDROID_VERSION_CODE=$AUTO_BUILD_NUMBER" >> "$CM_ENV"
+        echo "IOS_BUILD_NUMBER=$AUTO_BUILD_NUMBER" >> "$CM_ENV"
+
+        echo "Automatic Android versionCode: $AUTO_BUILD_NUMBER"
+        echo "Automatic iOS build number: $AUTO_BUILD_NUMBER"
+    - name: Configure Android version and signing
+      script: |
+        cd "$APP_DIR"
+
+        cat > android/keystore.properties <<EOF
+        storeFile=$CM_KEYSTORE_PATH
+        storePassword=$CM_KEYSTORE_PASSWORD
+        keyAlias=$CM_KEY_ALIAS
+        keyPassword=$CM_KEY_PASSWORD
+        EOF
+
+        python3 <<'PY'
+        from pathlib import Path
+        import os
+        import re
+        import sys
+
+        build_file = Path("android/app/build.gradle")
+
+        if not build_file.exists():
+            print("Nie znaleziono android/app/build.gradle")
+            sys.exit(1)
+
+        text = build_file.read_text()
+
+        version_code = os.environ.get("ANDROID_VERSION_CODE")
+        if not version_code:
+            from datetime import datetime, timezone
+            base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            version_code = str(1000000000 + int((now - base).total_seconds() // 60))
+
+        version_name = os.environ.get("ANDROID_VERSION_NAME", "1.1")
+
+        text = re.sub(r"versionCode\s+\d+", f"versionCode {version_code}", text)
+        text = re.sub(r'versionName\s+"[^"]+"', f'versionName "{version_name}"', text)
+
+        def find_matching_brace(source, open_brace_index):
+            depth = 0
+            for i in range(open_brace_index, len(source)):
+                ch = source[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            return -1
+
+        def find_block(source, block_name, start=0, end=None):
+            if end is None:
+                end = len(source)
+            pattern = re.compile(r"(^|\n)([ \t]*)" + re.escape(block_name) + r"\s*\{")
+            match = pattern.search(source, start, end)
+            if not match:
+                return None
+            open_index = source.find("{", match.start(), match.end())
+            close_index = find_matching_brace(source, open_index)
+            if close_index == -1:
+                return None
+            return {
+                "match_start": match.start(),
+                "match_end": match.end(),
+                "open": open_index,
+                "close": close_index,
+                "indent": match.group(2),
+            }
+
+        keystore_block = """def keystoreProperties = new Properties()
+        def keystorePropertiesFile = rootProject.file('keystore.properties')
+        if (keystorePropertiesFile.exists()) {
+            keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+        }
+
+        """
+
+        if "keystorePropertiesFile = rootProject.file('keystore.properties')" not in text:
+            plugins_block = find_block(text, "plugins")
+            if plugins_block:
+                insert_at = plugins_block["close"] + 1
+                text = text[:insert_at] + "\n\n" + keystore_block + text[insert_at:]
+            else:
+                text = keystore_block + text
+
+        android_block = find_block(text, "android")
+        if not android_block:
+            print("Nie znaleziono bloku android { ... } w build.gradle")
+            sys.exit(1)
+
+        android_body = text[android_block["open"] + 1:android_block["close"]]
+
+        if "signingConfigs {" not in android_body:
+            build_types = find_block(text, "buildTypes", android_block["open"], android_block["close"])
+            signing_configs_block = """    signingConfigs {
+                release {
+                    keyAlias keystoreProperties['keyAlias']
+                    keyPassword keystoreProperties['keyPassword']
+                    storeFile file(keystoreProperties['storeFile'])
+                    storePassword keystoreProperties['storePassword']
+                }
+            }
+
+        """
+            if build_types:
+                text = text[:build_types["match_start"] + 1] + signing_configs_block + text[build_types["match_start"] + 1:]
+            else:
+                insert_at = android_block["close"]
+                text = text[:insert_at] + "\n" + signing_configs_block + text[insert_at:]
+
+        android_block = find_block(text, "android")
+        build_types = find_block(text, "buildTypes", android_block["open"], android_block["close"])
+
+        if not build_types:
+            insert_at = android_block["close"]
+            text = text[:insert_at] + """
+            buildTypes {
+                release {
+                    signingConfig signingConfigs.release
+                    minifyEnabled false
+                    proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+                }
+            }
+        """ + text[insert_at:]
+        else:
+            release_block = find_block(text, "release", build_types["open"], build_types["close"])
+            if not release_block:
+                insert_at = build_types["open"] + 1
+                text = text[:insert_at] + """
+                release {
+                    signingConfig signingConfigs.release
+                    minifyEnabled false
+                    proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+                }
+        """ + text[insert_at:]
+            else:
+                release_body = text[release_block["open"] + 1:release_block["close"]]
+                if "signingConfig signingConfigs.release" not in release_body:
+                    insert_at = release_block["open"] + 1
+                    text = text[:insert_at] + "\n            signingConfig signingConfigs.release" + text[insert_at:]
+
+        build_file.write_text(text)
+        PY
+
+        echo "Android build.gradle po konfiguracji:"
+        grep -n "versionCode\|versionName\|signingConfig\|signingConfigs" android/app/build.gradle || true
+    - name: Build signed Android App Bundle
+      script: |
+        cd "$APP_DIR/android"
+        chmod +x ./gradlew
+        ./gradlew bundleRelease
+    - name: Configure iOS version
+      script: |
+        cd "$APP_DIR"
+
+        python3 <<'PY'
+        from pathlib import Path
+        import os
+        import re
+        import sys
+
+        version_name = os.environ.get("IOS_VERSION_NAME", "1.1")
+        build_number = os.environ.get("IOS_BUILD_NUMBER") or os.environ.get("ANDROID_VERSION_CODE")
+        if not build_number:
+            from datetime import datetime, timezone
+            base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            build_number = str(1000000000 + int((now - base).total_seconds() // 60))
+
+        pbxproj = Path("ios/App/App.xcodeproj/project.pbxproj")
+
+        if not pbxproj.exists():
+            print("Nie znaleziono ios/App/App.xcodeproj/project.pbxproj")
+            sys.exit(1)
+
+        text = pbxproj.read_text()
+        text = re.sub(r"MARKETING_VERSION = [^;]+;", f"MARKETING_VERSION = {version_name};", text)
+        text = re.sub(r"CURRENT_PROJECT_VERSION = [^;]+;", f"CURRENT_PROJECT_VERSION = {build_number};", text)
+        pbxproj.write_text(text)
+
+        print(f"iOS MARKETING_VERSION={version_name}")
+        print(f"iOS CURRENT_PROJECT_VERSION={build_number}")
+        PY
+    - name: Set up iOS code signing
+      script: |
+        cd "$APP_DIR"
+        xcode-project use-profiles
+    - name: Install iOS Pods
+      script: |
+        cd "$APP_DIR/ios/App"
+        pod install
+    - name: Build iOS IPA
+      script: |
+        cd "$APP_DIR"
+
+        xcode-project build-ipa \
+          --workspace "$XCODE_WORKSPACE" \
+          --scheme "$XCODE_SCHEME"
+    artifacts:
+    - gzd_app/android/app/build/outputs/bundle/release/*.aab
+    - gzd_app/android/app/build/outputs/mapping/release/mapping.txt
+    - gzd_app/build/ios/ipa/*.ipa
+    - /tmp/xcodebuild_logs/*.log
+    - ~/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+  publish-tests-from-zip:
+    name: Build from ZIP and publish to tests
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: Gdzie z dzieckiem API
+    environment:
+      node: 22
+      xcode: latest
+      cocoapods: default
+      java: 21
+      groups:
+      - google_play
+      android_signing:
+      - gzd_android_keystore
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: eu.gdziezdzieckiem.stage
+      vars:
+        ZIP_FILE: stage-gzd-capacitor-v2.9.0.zip
+        APP_DIR: gzd_app
+        ANDROID_VERSION_NAME: 2.9.0
+        IOS_VERSION_NAME: 2.9.0
+        GOOGLE_PLAY_TRACK: internal
+        XCODE_WORKSPACE: ios/App/App.xcworkspace
+        XCODE_SCHEME: App
+        BUNDLE_ID: eu.gdziezdzieckiem.stage
+    scripts:
+    - name: Unpack ZIP
+      script: |
+        rm -rf unzip_tmp "$APP_DIR"
+        mkdir -p unzip_tmp "$APP_DIR"
+
+        if [ ! -f "$ZIP_FILE" ]; then
+          echo "Nie znaleziono pliku ZIP: $ZIP_FILE"
+          echo "Wrzuć plik $ZIP_FILE do repozytorium obok codemagic.yaml albo zmień ZIP_FILE w vars."
+          exit 1
+        fi
+
+        unzip -q "$ZIP_FILE" -d unzip_tmp
+
+        PACKAGE_JSON=$(find unzip_tmp -maxdepth 4 -name package.json | head -n 1)
+
+        if [ -z "$PACKAGE_JSON" ]; then
+          echo "Nie znaleziono package.json w ZIP."
+          exit 1
+        fi
+
+        SOURCE_DIR=$(dirname "$PACKAGE_JSON")
+        echo "Source directory: $SOURCE_DIR"
+
+        rsync -a "$SOURCE_DIR"/ "$APP_DIR"/
+        echo "APP_DIR=$APP_DIR" >> "$CM_ENV"
+
+        echo "Zawartość katalogu aplikacji:"
+        ls -la "$APP_DIR"
+    - name: Install npm dependencies
+      script: |
+        cd "$APP_DIR"
+        npm config set registry https://registry.npmjs.org/
+        echo "Node: $(node --version)"
+        echo "npm: $(npm --version)"
+        echo "Registry: $(npm config get registry)"
+        npm ci --no-audit --no-fund --loglevel=info
+    - name: Build web assets
+      script: |
+        cd "$APP_DIR"
+        npm run build
+        npm run test:scroll-restore
+        npm run test:android-navigation
+    - name: Add native Capacitor projects if missing
+      script: |
+        cd "$APP_DIR"
+
+        if [ ! -d "android" ]; then
+          npx cap add android
+        fi
+
+        if [ ! -d "ios" ]; then
+          npx cap add ios
+        fi
+    - name: Generate native icons with macOS sips
+      script: |
+        cd "$APP_DIR"
+
+        echo "Generating Android and iOS launcher icons from bundled assets without capacitor-assets."
+        chmod +x scripts/generate-native-icons-macos.sh
+        scripts/generate-native-icons-macos.sh
+
+        ls -la assets || true
+        ls -la android/app/src/main/res/mipmap-xxxhdpi || true
+        ls -la ios/App/App/Assets.xcassets/AppIcon.appiconset || true
+    - name: Sync and patch Capacitor projects
+      script: |
+        cd "$APP_DIR"
+
+        npx cap sync android
+        npx cap sync ios
+
+        node scripts/patch-android.js
+        npm run test:generated-android
+        node scripts/patch-ios.js
+        npm run test:location
+    - name: Calculate automatic build numbers
+      script: |
+        cd "$APP_DIR"
+
+        AUTO_BUILD_NUMBER=$(python3 <<'PY'
+        from datetime import datetime, timezone
+
+        # Numer budowania liczony automatycznie:
+        # 1 000 000 000 + liczba minut od 2026-01-01 UTC.
+        # Jest większy od dotychczasowych numerów w Google Play
+        # i rośnie automatycznie przy kolejnych buildach.
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        print(1000000000 + int((now - base).total_seconds() // 60))
+        PY
+        )
+
+        echo "ANDROID_VERSION_CODE=$AUTO_BUILD_NUMBER" >> "$CM_ENV"
+        echo "IOS_BUILD_NUMBER=$AUTO_BUILD_NUMBER" >> "$CM_ENV"
+
+        echo "Automatic Android versionCode: $AUTO_BUILD_NUMBER"
+        echo "Automatic iOS build number: $AUTO_BUILD_NUMBER"
+    - name: Configure Android version and signing
+      script: |
+        cd "$APP_DIR"
+
+        cat > android/keystore.properties <<EOF
+        storeFile=$CM_KEYSTORE_PATH
+        storePassword=$CM_KEYSTORE_PASSWORD
+        keyAlias=$CM_KEY_ALIAS
+        keyPassword=$CM_KEY_PASSWORD
+        EOF
+
+        python3 <<'PY'
+        from pathlib import Path
+        import os
+        import re
+        import sys
+
+        build_file = Path("android/app/build.gradle")
+
+        if not build_file.exists():
+            print("Nie znaleziono android/app/build.gradle")
+            sys.exit(1)
+
+        text = build_file.read_text()
+
+        version_code = os.environ.get("ANDROID_VERSION_CODE")
+        if not version_code:
+            from datetime import datetime, timezone
+            base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            version_code = str(1000000000 + int((now - base).total_seconds() // 60))
+
+        version_name = os.environ.get("ANDROID_VERSION_NAME", "1.1")
+
+        text = re.sub(r"versionCode\s+\d+", f"versionCode {version_code}", text)
+        text = re.sub(r'versionName\s+"[^"]+"', f'versionName "{version_name}"', text)
+
+        def find_matching_brace(source, open_brace_index):
+            depth = 0
+            for i in range(open_brace_index, len(source)):
+                ch = source[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            return -1
+
+        def find_block(source, block_name, start=0, end=None):
+            if end is None:
+                end = len(source)
+            pattern = re.compile(r"(^|\n)([ \t]*)" + re.escape(block_name) + r"\s*\{")
+            match = pattern.search(source, start, end)
+            if not match:
+                return None
+            open_index = source.find("{", match.start(), match.end())
+            close_index = find_matching_brace(source, open_index)
+            if close_index == -1:
+                return None
+            return {
+                "match_start": match.start(),
+                "match_end": match.end(),
+                "open": open_index,
+                "close": close_index,
+                "indent": match.group(2),
+            }
+
+        keystore_block = """def keystoreProperties = new Properties()
+        def keystorePropertiesFile = rootProject.file('keystore.properties')
+        if (keystorePropertiesFile.exists()) {
+            keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+        }
+
+        """
+
+        if "keystorePropertiesFile = rootProject.file('keystore.properties')" not in text:
+            plugins_block = find_block(text, "plugins")
+            if plugins_block:
+                insert_at = plugins_block["close"] + 1
+                text = text[:insert_at] + "\n\n" + keystore_block + text[insert_at:]
+            else:
+                text = keystore_block + text
+
+        android_block = find_block(text, "android")
+        if not android_block:
+            print("Nie znaleziono bloku android { ... } w build.gradle")
+            sys.exit(1)
+
+        android_body = text[android_block["open"] + 1:android_block["close"]]
+
+        if "signingConfigs {" not in android_body:
+            build_types = find_block(text, "buildTypes", android_block["open"], android_block["close"])
+            signing_configs_block = """    signingConfigs {
+                release {
+                    keyAlias keystoreProperties['keyAlias']
+                    keyPassword keystoreProperties['keyPassword']
+                    storeFile file(keystoreProperties['storeFile'])
+                    storePassword keystoreProperties['storePassword']
+                }
+            }
+
+        """
+            if build_types:
+                text = text[:build_types["match_start"] + 1] + signing_configs_block + text[build_types["match_start"] + 1:]
+            else:
+                insert_at = android_block["close"]
+                text = text[:insert_at] + "\n" + signing_configs_block + text[insert_at:]
+
+        android_block = find_block(text, "android")
+        build_types = find_block(text, "buildTypes", android_block["open"], android_block["close"])
+
+        if not build_types:
+            insert_at = android_block["close"]
+            text = text[:insert_at] + """
+            buildTypes {
+                release {
+                    signingConfig signingConfigs.release
+                    minifyEnabled false
+                    proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+                }
+            }
+        """ + text[insert_at:]
+        else:
+            release_block = find_block(text, "release", build_types["open"], build_types["close"])
+            if not release_block:
+                insert_at = build_types["open"] + 1
+                text = text[:insert_at] + """
+                release {
+                    signingConfig signingConfigs.release
+                    minifyEnabled false
+                    proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+                }
+        """ + text[insert_at:]
+            else:
+                release_body = text[release_block["open"] + 1:release_block["close"]]
+                if "signingConfig signingConfigs.release" not in release_body:
+                    insert_at = release_block["open"] + 1
+                    text = text[:insert_at] + "\n            signingConfig signingConfigs.release" + text[insert_at:]
+
+        build_file.write_text(text)
+        PY
+
+        echo "Android build.gradle po konfiguracji:"
+        grep -n "versionCode\|versionName\|signingConfig\|signingConfigs" android/app/build.gradle || true
+    - name: Build signed Android App Bundle
+      script: |
+        cd "$APP_DIR/android"
+        chmod +x ./gradlew
+        ./gradlew bundleRelease
+    - name: Configure iOS version
+      script: |
+        cd "$APP_DIR"
+
+        python3 <<'PY'
+        from pathlib import Path
+        import os
+        import re
+        import sys
+
+        version_name = os.environ.get("IOS_VERSION_NAME", "1.1")
+        build_number = os.environ.get("IOS_BUILD_NUMBER") or os.environ.get("ANDROID_VERSION_CODE")
+        if not build_number:
+            from datetime import datetime, timezone
+            base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            build_number = str(1000000000 + int((now - base).total_seconds() // 60))
+
+        pbxproj = Path("ios/App/App.xcodeproj/project.pbxproj")
+
+        if not pbxproj.exists():
+            print("Nie znaleziono ios/App/App.xcodeproj/project.pbxproj")
+            sys.exit(1)
+
+        text = pbxproj.read_text()
+        text = re.sub(r"MARKETING_VERSION = [^;]+;", f"MARKETING_VERSION = {version_name};", text)
+        text = re.sub(r"CURRENT_PROJECT_VERSION = [^;]+;", f"CURRENT_PROJECT_VERSION = {build_number};", text)
+        pbxproj.write_text(text)
+
+        print(f"iOS MARKETING_VERSION={version_name}")
+        print(f"iOS CURRENT_PROJECT_VERSION={build_number}")
+        PY
+    - name: Set up iOS code signing
+      script: |
+        cd "$APP_DIR"
+        xcode-project use-profiles
+    - name: Install iOS Pods
+      script: |
+        cd "$APP_DIR/ios/App"
+        pod install
+    - name: Build iOS IPA
+      script: |
+        cd "$APP_DIR"
+
+        xcode-project build-ipa \
+          --workspace "$XCODE_WORKSPACE" \
+          --scheme "$XCODE_SCHEME"
+    artifacts:
+    - gzd_app/android/app/build/outputs/bundle/release/*.aab
+    - gzd_app/android/app/build/outputs/mapping/release/mapping.txt
+    - gzd_app/build/ios/ipa/*.ipa
+    - /tmp/xcodebuild_logs/*.log
+    - ~/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+      google_play:
+        credentials: $GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS
+        track: $GOOGLE_PLAY_TRACK
+  ios-simulator-tests-from-zip:
+    name: Test iOS on iPhone + iPad simulators
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    environment:
+      node: 22
+      xcode: latest
+      cocoapods: default
+      vars:
+        ZIP_FILE: stage-gzd-capacitor-v2.9.0.zip
+        APP_DIR: gzd_app
+        IOS_VERSION_NAME: 2.9.0
+        XCODE_WORKSPACE: ios/App/App.xcworkspace
+        XCODE_SCHEME: App
+        BUNDLE_ID: eu.gdziezdzieckiem.stage
+    scripts:
+    - name: Unpack ZIP
+      script: |
+        rm -rf unzip_tmp "$APP_DIR"
+        mkdir -p unzip_tmp "$APP_DIR"
+
+        if [ ! -f "$ZIP_FILE" ]; then
+          echo "Nie znaleziono pliku ZIP: $ZIP_FILE"
+          echo "Wrzuć plik $ZIP_FILE do repozytorium obok codemagic.yaml albo zmień ZIP_FILE w vars."
+          exit 1
+        fi
+
+        unzip -q "$ZIP_FILE" -d unzip_tmp
+
+        PACKAGE_JSON=$(find unzip_tmp -maxdepth 4 -name package.json | head -n 1)
+
+        if [ -z "$PACKAGE_JSON" ]; then
+          echo "Nie znaleziono package.json w ZIP."
+          exit 1
+        fi
+
+        SOURCE_DIR=$(dirname "$PACKAGE_JSON")
+        echo "Source directory: $SOURCE_DIR"
+
+        rsync -a "$SOURCE_DIR"/ "$APP_DIR"/
+        echo "APP_DIR=$APP_DIR" >> "$CM_ENV"
+
+        echo "Zawartość katalogu aplikacji:"
+        ls -la "$APP_DIR"
+    - name: Install npm dependencies
+      script: |
+        cd "$APP_DIR"
+        npm config set registry https://registry.npmjs.org/
+        echo "Node: $(node --version)"
+        echo "npm: $(npm --version)"
+        echo "Registry: $(npm config get registry)"
+        npm ci --no-audit --no-fund --loglevel=info
+    - name: Build web assets
+      script: |
+        cd "$APP_DIR"
+        npm run build
+        npm run test:scroll-restore
+        npm run test:android-navigation
+    - name: Add iOS Capacitor project if missing
+      script: |
+        cd "$APP_DIR"
+
+        if [ ! -d "ios" ]; then
+          npx cap add ios
+        fi
+    - name: Generate iOS native icons
+      script: |
+        cd "$APP_DIR"
+
+        echo "Generating iOS launcher icons from bundled assets."
+        chmod +x scripts/generate-native-icons-macos.sh
+        scripts/generate-native-icons-macos.sh
+
+        ls -la assets || true
+        ls -la ios/App/App/Assets.xcassets/AppIcon.appiconset || true
+    - name: Sync and patch iOS project
+      script: |
+        cd "$APP_DIR"
+
+        npx cap sync ios
+        node scripts/patch-ios.js
+        npm run test:location
+    - name: Configure iOS simulator version
+      script: |
+        cd "$APP_DIR"
+
+        python3 <<'PY'
+        from pathlib import Path
+        import os
+        import re
+        import sys
+        from datetime import datetime, timezone
+
+        version_name = os.environ.get("IOS_VERSION_NAME", "2.7.0")
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        build_number = str(1000000000 + int((now - base).total_seconds() // 60))
+
+        pbxproj = Path("ios/App/App.xcodeproj/project.pbxproj")
+
+        if not pbxproj.exists():
+            print("Nie znaleziono ios/App/App.xcodeproj/project.pbxproj")
+            sys.exit(1)
+
+        text = pbxproj.read_text()
+        text = re.sub(r"MARKETING_VERSION = [^;]+;", f"MARKETING_VERSION = {version_name};", text)
+        text = re.sub(r"CURRENT_PROJECT_VERSION = [^;]+;", f"CURRENT_PROJECT_VERSION = {build_number};", text)
+        pbxproj.write_text(text)
+
+        print(f"iOS simulator MARKETING_VERSION={version_name}")
+        print(f"iOS simulator CURRENT_PROJECT_VERSION={build_number}")
+        PY
+    - name: Install iOS Pods
+      script: |
+        cd "$APP_DIR/ios/App"
+        pod install
+    - name: Build iOS simulator app
+      script: |
+        cd "$APP_DIR"
+        mkdir -p build/ios/simulator
+
+        xcodebuild \
+          -workspace "$XCODE_WORKSPACE" \
+          -scheme "$XCODE_SCHEME" \
+          -configuration Debug \
+          -sdk iphonesimulator \
+          -derivedDataPath build/ios/simulator \
+          CODE_SIGNING_ALLOWED=NO \
+          build | tee build/ios/simulator/xcodebuild-simulator.log
+
+        SIM_APP_PATH=$(find "$PWD/build/ios/simulator/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name "*.app" -type d | head -n 1)
+
+        if [ -z "$SIM_APP_PATH" ]; then
+          echo "Nie znaleziono zbudowanej aplikacji .app dla symulatora."
+          find "$PWD/build/ios/simulator" -name "*.app" -type d || true
+          exit 1
+        fi
+
+        echo "SIM_APP_PATH=$SIM_APP_PATH" >> "$CM_ENV"
+        echo "Simulator app: $SIM_APP_PATH"
+    - name: Prepare iPhone and iPad simulators
+      script: |
+        cd "$APP_DIR"
+        mkdir -p build/simulator-test
+
+        python3 <<'PY' > build/simulator-test/simulators.env
+        import json
+        import re
+        import subprocess
+
+        def sh(*args):
+            return subprocess.check_output(args, text=True)
+
+        runtimes = json.loads(sh("xcrun", "simctl", "list", "runtimes", "-j"))["runtimes"]
+        ios_runtimes = [
+            r for r in runtimes
+            if r.get("isAvailable", True)
+            and "iOS" in (r.get("name", "") + r.get("identifier", ""))
+            and not r.get("availabilityError")
+        ]
+
+        if not ios_runtimes:
+            raise SystemExit("Brak dostępnego runtime iOS dla symulatorów.")
+
+        def version_tuple(runtime):
+            raw = runtime.get("version", "")
+            parts = re.findall(r"\d+", raw)
+            return tuple(int(p) for p in parts) if parts else (0,)
+
+        runtime = sorted(ios_runtimes, key=version_tuple)[-1]
+        runtime_id = runtime["identifier"]
+
+        devices_json = json.loads(sh("xcrun", "simctl", "list", "devices", "available", "-j"))
+        devices = devices_json.get("devices", {}).get(runtime_id, [])
+
+        def existing_device(kind):
+            candidates = [d for d in devices if kind.lower() in d.get("name", "").lower()]
+            preferred_words = ["Pro", "Air", "16", "15", "14", "13"]
+            for word in preferred_words:
+                for d in candidates:
+                    if word.lower() in d.get("name", "").lower():
+                        return d["udid"], d["name"]
+            if candidates:
+                return candidates[0]["udid"], candidates[0]["name"]
+            return None, None
+
+        iphone_udid, iphone_name = existing_device("iPhone")
+        ipad_udid, ipad_name = existing_device("iPad")
+
+        devtypes = json.loads(sh("xcrun", "simctl", "list", "devicetypes", "-j"))["devicetypes"]
+
+        def choose_devtype(kind):
+            candidates = [d for d in devtypes if kind.lower() in d.get("name", "").lower()]
+            preferred = ["Pro", "Air", "16", "15", "14", "13"]
+            for word in preferred:
+                for d in candidates:
+                    if word.lower() in d.get("name", "").lower():
+                        return d["identifier"], d["name"]
+            if candidates:
+                return candidates[0]["identifier"], candidates[0]["name"]
+            raise SystemExit(f"Brak typu urządzenia dla: {kind}")
+
+        if not iphone_udid:
+            type_id, type_name = choose_devtype("iPhone")
+            iphone_name = "GZD iPhone Simulator"
+            iphone_udid = sh("xcrun", "simctl", "create", iphone_name, type_id, runtime_id).strip()
+            print(f"# Created iPhone simulator from type {type_name}")
+
+        if not ipad_udid:
+            type_id, type_name = choose_devtype("iPad")
+            ipad_name = "GZD iPad Simulator"
+            ipad_udid = sh("xcrun", "simctl", "create", ipad_name, type_id, runtime_id).strip()
+            print(f"# Created iPad simulator from type {type_name}")
+
+        print(f"IPHONE_UDID={iphone_udid}")
+        print(f"IPHONE_NAME={iphone_name}")
+        print(f"IPAD_UDID={ipad_udid}")
+        print(f"IPAD_NAME={ipad_name}")
+        print(f"IOS_RUNTIME={runtime_id}")
+        PY
+
+        cat build/simulator-test/simulators.env
+        cat build/simulator-test/simulators.env >> "$CM_ENV"
+    - name: Run app on iPhone simulator
+      script: |
+        cd "$APP_DIR"
+
+        mkdir -p build/simulator-test/iphone
+
+        echo "iPhone simulator: $IPHONE_NAME / $IPHONE_UDID"
+
+        xcrun simctl shutdown "$IPHONE_UDID" || true
+        xcrun simctl boot "$IPHONE_UDID" || true
+        xcrun simctl bootstatus "$IPHONE_UDID" -b
+
+        xcrun simctl install "$IPHONE_UDID" "$SIM_APP_PATH"
+        xcrun simctl launch "$IPHONE_UDID" "$BUNDLE_ID"
+
+        sleep 15
+
+        xcrun simctl io "$IPHONE_UDID" screenshot build/simulator-test/iphone/iphone-start.png
+        xcrun simctl terminate "$IPHONE_UDID" "$BUNDLE_ID" || true
+    - name: Run app on iPad simulator
+      script: |
+        cd "$APP_DIR"
+
+        mkdir -p build/simulator-test/ipad
+
+        echo "iPad simulator: $IPAD_NAME / $IPAD_UDID"
+
+        xcrun simctl shutdown "$IPAD_UDID" || true
+        xcrun simctl boot "$IPAD_UDID" || true
+        xcrun simctl bootstatus "$IPAD_UDID" -b
+
+        xcrun simctl install "$IPAD_UDID" "$SIM_APP_PATH"
+        xcrun simctl launch "$IPAD_UDID" "$BUNDLE_ID"
+
+        sleep 15
+
+        xcrun simctl io "$IPAD_UDID" screenshot build/simulator-test/ipad/ipad-start.png
+        xcrun simctl terminate "$IPAD_UDID" "$BUNDLE_ID" || true
+    artifacts:
+    - gzd_app/build/ios/simulator/xcodebuild-simulator.log
+    - gzd_app/build/ios/simulator/Build/Products/Debug-iphonesimulator/*.app
+    - gzd_app/build/simulator-test/**/*.png
+    - /tmp/xcodebuild_logs/*.log
+  app-preview-ios-from-zip:
+    name: App Preview iOS Simulator
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    environment:
+      node: 22
+      xcode: latest
+      cocoapods: default
+      vars:
+        ZIP_FILE: stage-gzd-capacitor-v2.9.0.zip
+        APP_DIR: gzd_app
+        IOS_VERSION_NAME: 2.9.0
+        XCODE_WORKSPACE: ios/App/App.xcworkspace
+        XCODE_SCHEME: App
+        BUNDLE_ID: eu.gdziezdzieckiem.stage
+    scripts:
+    - name: Unpack ZIP
+      script: |
+        rm -rf unzip_tmp "$APP_DIR"
+        mkdir -p unzip_tmp "$APP_DIR"
+
+        if [ ! -f "$ZIP_FILE" ]; then
+          echo "Nie znaleziono pliku ZIP: $ZIP_FILE"
+          echo "Wrzuć plik $ZIP_FILE do repozytorium obok codemagic.yaml albo zmień ZIP_FILE w vars."
+          exit 1
+        fi
+
+        unzip -q "$ZIP_FILE" -d unzip_tmp
+
+        PACKAGE_JSON=$(find unzip_tmp -maxdepth 4 -name package.json | head -n 1)
+
+        if [ -z "$PACKAGE_JSON" ]; then
+          echo "Nie znaleziono package.json w ZIP."
+          exit 1
+        fi
+
+        SOURCE_DIR=$(dirname "$PACKAGE_JSON")
+        echo "Source directory: $SOURCE_DIR"
+
+        rsync -a "$SOURCE_DIR"/ "$APP_DIR"/
+        echo "APP_DIR=$APP_DIR" >> "$CM_ENV"
+    - name: Install npm dependencies
+      script: |
+        cd "$APP_DIR"
+        npm config set registry https://registry.npmjs.org/
+        echo "Node: $(node --version)"
+        echo "npm: $(npm --version)"
+        echo "Registry: $(npm config get registry)"
+        npm ci --no-audit --no-fund --loglevel=info
+    - name: Build web assets
+      script: |
+        cd "$APP_DIR"
+        npm run build
+        npm run test:scroll-restore
+        npm run test:android-navigation
+    - name: Add iOS Capacitor project if missing
+      script: |
+        cd "$APP_DIR"
+
+        if [ ! -d "ios" ]; then
+          npx cap add ios
+        fi
+    - name: Generate iOS native icons
+      script: |
+        cd "$APP_DIR"
+        chmod +x scripts/generate-native-icons-macos.sh
+        scripts/generate-native-icons-macos.sh
+    - name: Sync and patch iOS project
+      script: |
+        cd "$APP_DIR"
+        npx cap sync ios
+        node scripts/patch-ios.js
+        npm run test:location
+    - name: Configure iOS simulator version
+      script: |
+        cd "$APP_DIR"
+
+        python3 <<'PY'
+        from pathlib import Path
+        import os
+        import re
+        import sys
+        from datetime import datetime, timezone
+
+        version_name = os.environ.get("IOS_VERSION_NAME", "2.8.5")
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        build_number = str(1000000000 + int((now - base).total_seconds() // 60))
+
+        pbxproj = Path("ios/App/App.xcodeproj/project.pbxproj")
+
+        if not pbxproj.exists():
+            print("Nie znaleziono ios/App/App.xcodeproj/project.pbxproj")
+            sys.exit(1)
+
+        text = pbxproj.read_text()
+        text = re.sub(r"MARKETING_VERSION = [^;]+;", f"MARKETING_VERSION = {version_name};", text)
+        text = re.sub(r"CURRENT_PROJECT_VERSION = [^;]+;", f"CURRENT_PROJECT_VERSION = {build_number};", text)
+        pbxproj.write_text(text)
+
+        print(f"iOS simulator MARKETING_VERSION={version_name}")
+        print(f"iOS simulator CURRENT_PROJECT_VERSION={build_number}")
+        PY
+    - name: Install iOS Pods
+      script: |
+        cd "$APP_DIR/ios/App"
+        pod install
+    - name: Build previewable iOS simulator .app
+      script: |
+        cd "$APP_DIR"
+
+        # App Preview wymaga unsigned .app zbudowanego dla iOS Simulator.
+        # Zostawiamy domyślny DerivedData, bo Codemagic rozpoznaje .app właśnie z tego miejsca.
+        set -o pipefail
+
+        xcodebuild build \
+          -workspace "$XCODE_WORKSPACE" \
+          -scheme "$XCODE_SCHEME" \
+          -sdk iphonesimulator \
+          -destination 'generic/platform=iOS Simulator' \
+          -configuration Debug \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO | tee "$CM_BUILD_DIR/xcodebuild-app-preview.log"
+
+        echo "Wszystkie znalezione katalogi .app:"
+        find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "*.app" -print || true
+
+        APP_PATH="$(
+          find "$HOME/Library/Developer/Xcode/DerivedData" -type d -name "*.app" -prune | while read -r app; do
+            if [ -f "$app/Info.plist" ]; then
+              echo "$app"
+              break
+            fi
+          done
+        )"
+
+        if [ -z "$APP_PATH" ]; then
+          echo "Nie znaleziono poprawnego .app z Info.plist."
+          echo "Lista Info.plist w DerivedData:"
+          find "$HOME/Library/Developer/Xcode/DerivedData" -name Info.plist -print || true
+          exit 1
+        fi
+
+        echo "OK: poprawny .app dla App Preview:"
+        echo "$APP_PATH"
+
+        /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist" || true
+        /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist" || true
+
+        echo "APP_PREVIEW_APP_PATH=$APP_PATH" >> "$CM_ENV"
+    artifacts:
+    - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+    - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    - $CM_BUILD_DIR/xcodebuild-app-preview.log
+  ios-iphone-screenshots-from-zip:
+    name: iPhone screenshots - Start / Wyszukaj / Ulubione / Ostatnio
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    environment:
+      node: 22
+      xcode: latest
+      cocoapods: default
+      vars:
+        ZIP_FILE: stage-gzd-capacitor-v2.9.0.zip
+        APP_DIR: gzd_app
+        IOS_VERSION_NAME: 2.9.0
+        XCODE_WORKSPACE: ios/App/App.xcworkspace
+        XCODE_SCHEME: App
+        BUNDLE_ID: eu.gdziezdzieckiem.stage
+        SCREENSHOT_SCHEME: gzdshot
+    scripts:
+    - &id001
+      name: Unpack ZIP
+      script: |
+        set -euo pipefail
+
+        rm -rf unzip_tmp "$APP_DIR"
+        mkdir -p unzip_tmp "$APP_DIR"
+
+        if [ ! -f "$ZIP_FILE" ]; then
+          echo "Nie znaleziono pliku ZIP: $ZIP_FILE"
+          echo "Wrzuć plik $ZIP_FILE do repozytorium obok codemagic.yaml albo zmień ZIP_FILE w vars."
+          exit 1
+        fi
+
+        unzip -q "$ZIP_FILE" -d unzip_tmp
+
+        PACKAGE_JSON=$(find unzip_tmp -maxdepth 4 -name package.json | head -n 1)
+
+        if [ -z "$PACKAGE_JSON" ]; then
+          echo "Nie znaleziono package.json w ZIP."
+          exit 1
+        fi
+
+        SOURCE_DIR=$(dirname "$PACKAGE_JSON")
+        echo "Source directory: $SOURCE_DIR"
+
+        rsync -a "$SOURCE_DIR"/ "$APP_DIR"/
+        echo "APP_DIR=$APP_DIR" >> "$CM_ENV"
+
+        echo "Zawartość katalogu aplikacji:"
+        ls -la "$APP_DIR"
+    - &id002
+      name: Install npm dependencies
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+        npm config set registry https://registry.npmjs.org/
+        echo "Node: $(node --version)"
+        echo "npm: $(npm --version)"
+        echo "Registry: $(npm config get registry)"
+        npm ci --no-audit --no-fund --loglevel=info
+    - &id003
+      name: Add screenshot JS helper
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+
+        python3 <<'PY'
+        from pathlib import Path
+
+        inject_block = r'''
+              var gzdShot = '';
+              try { gzdShot = String(new URLSearchParams(location.search || '').get('gzd_screen') || '').toLowerCase(); } catch (_) {}
+
+              if (gzdShot === 'start') {
+                renderHome();
+                return;
+              }
+
+              if (gzdShot === 'favorites' || gzdShot === 'ulubione') {
+                renderListScreen('favorites');
+                return;
+              }
+
+              if (gzdShot === 'recent' || gzdShot === 'ostatnio') {
+                renderListScreen('recent');
+                return;
+              }
+        '''
+
+        helper = r'''
+          window.__GZD_SCREENSHOT_ACCEPT_COOKIES__ = function() {
+            try {
+              var words = ['akcept', 'zgadzam', 'accept', 'agree', 'allow', 'ok'];
+              var selectors = ['#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll','#cookie_action_close_header','#wt-cli-accept-all-btn','.cky-btn-accept','.cmplz-accept','.cookie-accept','[data-cky-tag="accept-button"]','button','a'];
+              function visible(el){if(!el)return false;var r=el.getBoundingClientRect();var s=window.getComputedStyle(el);return r.width>10&&r.height>10&&s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0';}
+              function goodText(el){var txt=((el.innerText||el.textContent||el.getAttribute('aria-label')||el.getAttribute('title')||'')+'').toLowerCase();for(var i=0;i<words.length;i++){if(txt.indexOf(words[i])!==-1)return true;}return false;}
+              for(var s=0;s<selectors.length;s++){var els=document.querySelectorAll(selectors[s]);for(var i=0;i<els.length;i++){if(visible(els[i])&&goodText(els[i])){els[i].click();return true;}}}
+            } catch(e) {}
+            return false;
+          };
+        '''
+
+        for rel in ["src/gzd-app-ui.js", "dist/gzd-app-ui.js"]:
+            path = Path(rel)
+            if not path.exists():
+                continue
+
+            source = path.read_text(encoding="utf-8")
+
+            if "gzd_screen" not in source:
+                marker = "      hideGooglePlayReferences();\n\n      const place = readPlaceData();"
+                if marker not in source:
+                    raise SystemExit(f"Nie znaleziono miejsca na gzd_screen w {rel}")
+                source = source.replace(
+                    marker,
+                    "      hideGooglePlayReferences();\n" + inject_block + "\n      const place = readPlaceData();",
+                    1
+                )
+                print(f"Dodano obsługę ?gzd_screen=... do {rel}")
+
+            if "__GZD_SCREENSHOT_ACCEPT_COOKIES__" not in source:
+                marker = "  window.__GZD_RENDER_HOME__ = function () {"
+                if marker not in source:
+                    raise SystemExit(f"Nie znaleziono markera __GZD_RENDER_HOME__ w {rel}")
+                source = source.replace(marker, helper + "\n\n" + marker, 1)
+                print(f"Dodano helper cookies do {rel}")
+
+            path.write_text(source, encoding="utf-8")
+        PY
+    - &id004
+      name: Build web assets
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+        npm run build
+        npm run test:scroll-restore
+        npm run test:android-navigation
+    - &id005
+      name: Add iOS Capacitor project if missing
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+
+        if [ ! -d "ios" ]; then
+          npx cap add ios
+        fi
+    - &id006
+      name: Generate iOS native icons
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+
+        chmod +x scripts/generate-native-icons-macos.sh
+        scripts/generate-native-icons-macos.sh
+
+        ls -la ios/App/App/Assets.xcassets/AppIcon.appiconset || true
+    - &id007
+      name: Sync and patch iOS project
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+
+        npx cap sync ios
+        node scripts/patch-ios.js
+        npm run test:location
+    - &id008
+      name: Add screenshot launch automation
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+
+        python3 <<'PY'
+        from pathlib import Path
+
+        swift_path = Path("ios/App/App/AppDelegate.swift")
+        source = swift_path.read_text(encoding="utf-8")
+
+        if "GZDScreenshotLaunchScreenV9" not in source:
+            marker = "    override func viewDidLoad() {\n        super.viewDidLoad()"
+            if marker not in source:
+                raise SystemExit("Nie znaleziono viewDidLoad w GZDViewController.")
+
+            source = source.replace(
+                marker,
+                marker + "\n        prepareGZDScreenshotLaunchScreenV9()",
+                1
+            )
+
+            method = r'''
+            private func prepareGZDScreenshotLaunchScreenV9() {
+                guard let screenRaw = ProcessInfo.processInfo.environment["GZD_SCREENSHOT_SCREEN"], screenRaw.isEmpty == false else {
+                    return
+                }
+
+                let screen = screenRaw.lowercased()
+                var urlText = "https://stage.gdziezdzieckiem.eu/?gzd_screen=start"
+
+                if screen == "favorites" || screen == "ulubione" {
+                    urlText = "https://stage.gdziezdzieckiem.eu/?gzd_screen=favorites"
+                } else if screen == "recent" || screen == "ostatnio" {
+                    urlText = "https://stage.gdziezdzieckiem.eu/?gzd_screen=recent"
+                } else if screen == "map" || screen == "wyszukaj" {
+                    urlText = "https://stage.gdziezdzieckiem.eu/?gzd_app_map=1#brxe-qnovlp"
+                }
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, let url = URL(string: urlText) else { return }
+                    self.gzdNavigationStack.removeAll()
+                    self.webView?.scrollView.setContentOffset(.zero, animated: false)
+                    self.webView?.load(URLRequest(url: url))
+                }
+
+                let delays: [Double] = [3.0, 6.0, 10.0, 15.0, 22.0, 30.0]
+                for delay in delays {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        self?.acceptGZDScreenshotCookiesV9()
+                        if screen == "map" || screen == "wyszukaj" {
+                            self?.openMapSectionInApp()
+                        }
+                    }
+                }
+            }
+
+            private func acceptGZDScreenshotCookiesV9() {
+                let js = #"(function(){try{if(window.__GZD_SCREENSHOT_ACCEPT_COOKIES__){window.__GZD_SCREENSHOT_ACCEPT_COOKIES__();}var words=['akcept','zgadzam','accept','agree','allow','ok'];var selectors=['#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll','#cookie_action_close_header','#wt-cli-accept-all-btn','.cky-btn-accept','.cmplz-accept','.cookie-accept','[data-cky-tag="accept-button"]','button','a'];function visible(el){if(!el)return false;var r=el.getBoundingClientRect();var s=window.getComputedStyle(el);return r.width>10&&r.height>10&&s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0';}function goodText(el){var txt=((el.innerText||el.textContent||el.getAttribute('aria-label')||el.getAttribute('title')||'')+'').toLowerCase();for(var i=0;i<words.length;i++){if(txt.indexOf(words[i])!==-1)return true;}return false;}for(var s=0;s<selectors.length;s++){var els=document.querySelectorAll(selectors[s]);for(var i=0;i<els.length;i++){if(visible(els[i])&&goodText(els[i])){els[i].click();return true;}}}}catch(e){}return false;})();"#
+
+                DispatchQueue.main.async { [weak self] in
+                    self?.webView?.evaluateJavaScript(js, completionHandler: nil)
+                }
+            }
+
+        '''
+
+            end_marker = "\n    private func showStartupSplashOverlay()"
+            if end_marker not in source:
+                raise SystemExit("Nie znaleziono miejsca na metody screenshotów.")
+
+            source = source.replace(end_marker, "\n" + method + end_marker, 1)
+            swift_path.write_text(source, encoding="utf-8")
+            print("Dodano screenshot mode V9 do AppDelegate.swift.")
+        else:
+            print("Screenshot mode V9 już istnieje.")
+
+        bad = []
+        for i, line in enumerate(swift_path.read_text(encoding="utf-8").splitlines(), 1):
+            if "\\/" in line or "\\." in line:
+                bad.append((i, line.strip()))
+
+        if bad:
+            print("Podejrzane escape w Swift:")
+            for item in bad[:20]:
+                print(item)
+            raise SystemExit(1)
+
+        print("Screenshot launch V9 patch OK")
+        PY
+    - &id009
+      name: Configure iOS simulator version
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+
+        python3 <<'PY'
+        from pathlib import Path
+        import os
+        import re
+        import sys
+        from datetime import datetime, timezone
+
+        version_name = os.environ.get("IOS_VERSION_NAME", "2.9.0")
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        build_number = str(1000000000 + int((now - base).total_seconds() // 60))
+
+        pbxproj = Path("ios/App/App.xcodeproj/project.pbxproj")
+        if not pbxproj.exists():
+            print("Nie znaleziono ios/App/App.xcodeproj/project.pbxproj")
+            sys.exit(1)
+
+        text = pbxproj.read_text()
+        text = re.sub(r"MARKETING_VERSION = [^;]+;", f"MARKETING_VERSION = {version_name};", text)
+        text = re.sub(r"CURRENT_PROJECT_VERSION = [^;]+;", f"CURRENT_PROJECT_VERSION = {build_number};", text)
+        pbxproj.write_text(text)
+
+        print(f"iOS screenshot MARKETING_VERSION={version_name}")
+        print(f"iOS screenshot CURRENT_PROJECT_VERSION={build_number}")
+        PY
+    - &id010
+      name: Install iOS Pods
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR/ios/App"
+        pod install
+    - &id011
+      name: Build iOS simulator app
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+        mkdir -p build/ios/simulator
+
+        set -o pipefail
+
+        # iPhone i iPad używają tego samego SDK: iphonesimulator.
+        xcodebuild \
+          -workspace "$XCODE_WORKSPACE" \
+          -scheme "$XCODE_SCHEME" \
+          -configuration Debug \
+          -sdk iphonesimulator \
+          -derivedDataPath build/ios/simulator \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO \
+          build | tee build/ios/simulator/xcodebuild-screenshots.log
+
+        SIM_APP_PATH=$(find "$PWD/build/ios/simulator/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name "*.app" -type d | head -n 1)
+
+        if [ -z "$SIM_APP_PATH" ]; then
+          echo "Nie znaleziono zbudowanej aplikacji .app dla symulatora."
+          find "$PWD/build/ios/simulator" -name "*.app" -type d || true
+          exit 1
+        fi
+
+        echo "SIM_APP_PATH=$SIM_APP_PATH" >> "$CM_ENV"
+        echo "Simulator app: $SIM_APP_PATH"
+    - name: Prepare iPhone simulator
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+        mkdir -p build/iphone-screenshots
+
+        python3 <<'PY' > build/iphone-screenshots/simulator.env
+        import json
+        import re
+        import subprocess
+
+        def sh(*args):
+            return subprocess.check_output(args, text=True)
+
+        runtimes = json.loads(sh("xcrun", "simctl", "list", "runtimes", "-j"))["runtimes"]
+        ios_runtimes = [
+            r for r in runtimes
+            if r.get("isAvailable", True)
+            and "iOS" in (r.get("name", "") + r.get("identifier", ""))
+            and not r.get("availabilityError")
+        ]
+
+        if not ios_runtimes:
+            raise SystemExit("Brak dostępnego runtime iOS dla symulatorów.")
+
+        def version_tuple(runtime):
+            raw = runtime.get("version", "")
+            parts = re.findall(r"\d+", raw)
+            return tuple(int(p) for p in parts) if parts else (0,)
+
+        runtime = sorted(ios_runtimes, key=version_tuple)[-1]
+        runtime_id = runtime["identifier"]
+
+        devices_json = json.loads(sh("xcrun", "simctl", "list", "devices", "available", "-j"))
+        devices = devices_json.get("devices", {}).get(runtime_id, [])
+
+        preferred_words = ["16 Pro", "15 Pro", "14 Pro", "13 Pro", "16", "15", "14"]
+        candidates = [d for d in devices if "iphone" in d.get("name", "").lower()]
+
+        udid = None
+        device_name = None
+
+        for word in preferred_words:
+            for d in candidates:
+                if word.lower() in d.get("name", "").lower():
+                    udid = d["udid"]
+                    device_name = d["name"]
+                    break
+            if udid:
+                break
+
+        if not udid and candidates:
+            udid = candidates[0]["udid"]
+            device_name = candidates[0]["name"]
+
+        if not udid:
+            devtypes = json.loads(sh("xcrun", "simctl", "list", "devicetypes", "-j"))["devicetypes"]
+            types = [d for d in devtypes if "iphone" in d.get("name", "").lower()]
+            if not types:
+                raise SystemExit("Brak typu urządzenia iPhone.")
+
+            selected_type = None
+            for word in preferred_words:
+                for d in types:
+                    if word.lower() in d.get("name", "").lower():
+                        selected_type = d
+                        break
+                if selected_type:
+                    break
+
+            if selected_type is None:
+                selected_type = types[-1]
+
+            type_id = selected_type["identifier"]
+            device_name = "GZD iPhone Screenshot Simulator"
+            udid = sh("xcrun", "simctl", "create", device_name, type_id, runtime_id).strip()
+
+        print(f"IPHONE_UDID={udid}")
+        print(f"IPHONE_NAME={device_name}")
+        print(f"IOS_RUNTIME={runtime_id}")
+        PY
+
+        cat build/iphone-screenshots/simulator.env
+        cat build/iphone-screenshots/simulator.env >> "$CM_ENV"
+    - name: Capture iPhone screenshots
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+
+        export SCREENSHOT_DIR="$PWD/build/iphone-screenshots"
+        mkdir -p "$SCREENSHOT_DIR"
+
+        UDID="${IPHONE_UDID}"
+        DEVICE_NAME="${IPHONE_NAME}"
+
+        echo "iPhone simulator: $DEVICE_NAME / $UDID"
+        echo "SCREENSHOT_DIR=$SCREENSHOT_DIR"
+
+        xcrun simctl shutdown "$UDID" || true
+        xcrun simctl boot "$UDID" || true
+        xcrun simctl bootstatus "$UDID" -b
+
+        open -a Simulator --args -CurrentDeviceUDID "$UDID" || true
+        sleep 8
+
+        xcrun simctl status_bar "$UDID" override \
+          --time 09:41 \
+          --wifiBars 3 \
+          --cellularBars 4 \
+          --batteryState charged \
+          --batteryLevel 100 || true
+
+        take_screenshot() {
+          local filename="$1"
+          local label="$2"
+          local path="$SCREENSHOT_DIR/$filename"
+
+          mkdir -p "$SCREENSHOT_DIR"
+          echo "Screenshot: $label -> $path"
+
+          for attempt in 1 2 3 4 5; do
+            rm -f "$path"
+
+            if xcrun simctl io "$UDID" screenshot "$path"; then
+              if [ -s "$path" ]; then
+                file "$path" || true
+                return 0
+              fi
+            fi
+
+            echo "Screenshot retry $attempt for $label"
+            ls -la "$SCREENSHOT_DIR" || true
+            sleep 3
+          done
+
+          echo "Nie udało się zapisać screenshotu: $label"
+          return 1
+        }
+
+        launch_for_screen() {
+          local screen="$1"
+          local wait_seconds="$2"
+
+          echo "Uruchamiam ekran: $screen"
+
+          xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
+          xcrun simctl uninstall "$UDID" "$BUNDLE_ID" || true
+          xcrun simctl install "$UDID" "$SIM_APP_PATH"
+
+          SIMCTL_CHILD_GZD_SCREENSHOT_SCREEN="$screen" \
+            xcrun simctl launch --terminate-running-process "$UDID" "$BUNDLE_ID"
+
+          sleep "$wait_seconds"
+        }
+
+        launch_for_screen "start" "20"
+        take_screenshot "01-start.png" "Start"
+
+        launch_for_screen "map" "44"
+        take_screenshot "02-wyszukaj-mapa.png" "Wyszukaj / mapa"
+
+        launch_for_screen "favorites" "22"
+        take_screenshot "03-ulubione.png" "Ulubione"
+
+        launch_for_screen "recent" "22"
+        take_screenshot "04-ostatnio-ogladane.png" "Ostatnio oglądane"
+
+        xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
+        xcrun simctl status_bar "$UDID" clear || true
+
+        python3 <<'PY'
+        from pathlib import Path
+        import json
+        import os
+        from datetime import datetime
+
+        folder = Path(os.environ["SCREENSHOT_DIR"])
+        pngs = sorted(folder.glob("*.png"))
+
+        manifest = {
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "device": os.environ.get("IPHONE_NAME", ""),
+            "udid": os.environ.get("IPHONE_UDID", ""),
+            "screenshots": [p.name for p in pngs],
+        }
+
+        (folder / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        required = {
+            "01-start.png",
+            "02-wyszukaj-mapa.png",
+            "03-ulubione.png",
+            "04-ostatnio-ogladane.png",
+        }
+
+        existing = {p.name for p in pngs}
+        missing = sorted(required - existing)
+
+        print("PNG files:", sorted(existing))
+        if missing:
+            print("Brak screenshotów:", missing)
+            raise SystemExit(1)
+        PY
+
+        cd build
+        zip -r iphone-screenshots.zip iphone-screenshots
+        cd ..
+
+        echo "Wygenerowane screenshoty:"
+        ls -la "$SCREENSHOT_DIR"
+    artifacts:
+    - gzd_app/build/iphone-screenshots/**
+    - gzd_app/build/iphone-screenshots.zip
+    - gzd_app/build/ios/simulator/xcodebuild-screenshots.log
+    - gzd_app/build/ios/simulator/Build/Products/Debug-iphonesimulator/*.app
+    - /tmp/xcodebuild_logs/*.log
+  ios-ipad-screenshots-from-zip:
+    name: iPad screenshots - Start / Wyszukaj / Ulubione / Ostatnio
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    environment:
+      node: 22
+      xcode: latest
+      cocoapods: default
+      vars:
+        ZIP_FILE: stage-gzd-capacitor-v2.9.0.zip
+        APP_DIR: gzd_app
+        IOS_VERSION_NAME: 2.9.0
+        XCODE_WORKSPACE: ios/App/App.xcworkspace
+        XCODE_SCHEME: App
+        BUNDLE_ID: eu.gdziezdzieckiem.stage
+        SCREENSHOT_SCHEME: gzdshot
+    scripts:
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+    - *id009
+    - *id010
+    - *id011
+    - name: Prepare iPad simulator
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+        mkdir -p build/ipad-screenshots
+
+        python3 <<'PY' > build/ipad-screenshots/simulator.env
+        import json
+        import re
+        import subprocess
+
+        def sh(*args):
+            return subprocess.check_output(args, text=True)
+
+        runtimes = json.loads(sh("xcrun", "simctl", "list", "runtimes", "-j"))["runtimes"]
+        ios_runtimes = [
+            r for r in runtimes
+            if r.get("isAvailable", True)
+            and "iOS" in (r.get("name", "") + r.get("identifier", ""))
+            and not r.get("availabilityError")
+        ]
+
+        if not ios_runtimes:
+            raise SystemExit("Brak dostępnego runtime iOS dla symulatorów.")
+
+        def version_tuple(runtime):
+            raw = runtime.get("version", "")
+            parts = re.findall(r"\d+", raw)
+            return tuple(int(p) for p in parts) if parts else (0,)
+
+        runtime = sorted(ios_runtimes, key=version_tuple)[-1]
+        runtime_id = runtime["identifier"]
+
+        devices_json = json.loads(sh("xcrun", "simctl", "list", "devices", "available", "-j"))
+        devices = devices_json.get("devices", {}).get(runtime_id, [])
+
+        preferred_words = ["13-inch", "12.9", "11-inch", "11", "Air", "Pro", "iPad"]
+        candidates = [d for d in devices if "ipad" in d.get("name", "").lower()]
+
+        udid = None
+        device_name = None
+
+        for word in preferred_words:
+            for d in candidates:
+                if word.lower() in d.get("name", "").lower():
+                    udid = d["udid"]
+                    device_name = d["name"]
+                    break
+            if udid:
+                break
+
+        if not udid and candidates:
+            udid = candidates[0]["udid"]
+            device_name = candidates[0]["name"]
+
+        if not udid:
+            devtypes = json.loads(sh("xcrun", "simctl", "list", "devicetypes", "-j"))["devicetypes"]
+            types = [d for d in devtypes if "ipad" in d.get("name", "").lower()]
+            if not types:
+                raise SystemExit("Brak typu urządzenia iPad.")
+
+            selected_type = None
+            for word in preferred_words:
+                for d in types:
+                    if word.lower() in d.get("name", "").lower():
+                        selected_type = d
+                        break
+                if selected_type:
+                    break
+
+            if selected_type is None:
+                selected_type = types[-1]
+
+            type_id = selected_type["identifier"]
+            device_name = "GZD iPad Screenshot Simulator"
+            udid = sh("xcrun", "simctl", "create", device_name, type_id, runtime_id).strip()
+
+        print(f"IPAD_UDID={udid}")
+        print(f"IPAD_NAME={device_name}")
+        print(f"IOS_RUNTIME={runtime_id}")
+        PY
+
+        cat build/ipad-screenshots/simulator.env
+        cat build/ipad-screenshots/simulator.env >> "$CM_ENV"
+    - name: Capture iPad screenshots
+      script: |
+        set -euo pipefail
+        cd "$APP_DIR"
+
+        export SCREENSHOT_DIR="$PWD/build/ipad-screenshots"
+        mkdir -p "$SCREENSHOT_DIR"
+
+        UDID="${IPAD_UDID}"
+        DEVICE_NAME="${IPAD_NAME}"
+
+        echo "iPad simulator: $DEVICE_NAME / $UDID"
+        echo "SCREENSHOT_DIR=$SCREENSHOT_DIR"
+
+        xcrun simctl shutdown "$UDID" || true
+        xcrun simctl boot "$UDID" || true
+        xcrun simctl bootstatus "$UDID" -b
+
+        open -a Simulator --args -CurrentDeviceUDID "$UDID" || true
+        sleep 8
+
+        xcrun simctl status_bar "$UDID" override \
+          --time 09:41 \
+          --wifiBars 3 \
+          --cellularBars 4 \
+          --batteryState charged \
+          --batteryLevel 100 || true
+
+        take_screenshot() {
+          local filename="$1"
+          local label="$2"
+          local path="$SCREENSHOT_DIR/$filename"
+
+          mkdir -p "$SCREENSHOT_DIR"
+          echo "Screenshot: $label -> $path"
+
+          for attempt in 1 2 3 4 5; do
+            rm -f "$path"
+
+            if xcrun simctl io "$UDID" screenshot "$path"; then
+              if [ -s "$path" ]; then
+                file "$path" || true
+                return 0
+              fi
+            fi
+
+            echo "Screenshot retry $attempt for $label"
+            ls -la "$SCREENSHOT_DIR" || true
+            sleep 3
+          done
+
+          echo "Nie udało się zapisać screenshotu: $label"
+          return 1
+        }
+
+        launch_for_screen() {
+          local screen="$1"
+          local wait_seconds="$2"
+
+          echo "Uruchamiam ekran: $screen"
+
+          xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
+          xcrun simctl uninstall "$UDID" "$BUNDLE_ID" || true
+          xcrun simctl install "$UDID" "$SIM_APP_PATH"
+
+          SIMCTL_CHILD_GZD_SCREENSHOT_SCREEN="$screen" \
+            xcrun simctl launch --terminate-running-process "$UDID" "$BUNDLE_ID"
+
+          sleep "$wait_seconds"
+        }
+
+        launch_for_screen "start" "20"
+        take_screenshot "01-start.png" "Start"
+
+        launch_for_screen "map" "44"
+        take_screenshot "02-wyszukaj-mapa.png" "Wyszukaj / mapa"
+
+        launch_for_screen "favorites" "22"
+        take_screenshot "03-ulubione.png" "Ulubione"
+
+        launch_for_screen "recent" "22"
+        take_screenshot "04-ostatnio-ogladane.png" "Ostatnio oglądane"
+
+        xcrun simctl terminate "$UDID" "$BUNDLE_ID" || true
+        xcrun simctl status_bar "$UDID" clear || true
+
+        python3 <<'PY'
+        from pathlib import Path
+        import json
+        import os
+        from datetime import datetime
+
+        folder = Path(os.environ["SCREENSHOT_DIR"])
+        pngs = sorted(folder.glob("*.png"))
+
+        manifest = {
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "device": os.environ.get("IPAD_NAME", ""),
+            "udid": os.environ.get("IPAD_UDID", ""),
+            "screenshots": [p.name for p in pngs],
+        }
+
+        (folder / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        required = {
+            "01-start.png",
+            "02-wyszukaj-mapa.png",
+            "03-ulubione.png",
+            "04-ostatnio-ogladane.png",
+        }
+
+        existing = {p.name for p in pngs}
+        missing = sorted(required - existing)
+
+        print("PNG files:", sorted(existing))
+        if missing:
+            print("Brak screenshotów:", missing)
+            raise SystemExit(1)
+        PY
+
+        cd build
+        zip -r ipad-screenshots.zip ipad-screenshots
+        cd ..
+
+        echo "Wygenerowane screenshoty:"
+        ls -la "$SCREENSHOT_DIR"
+    artifacts:
+    - gzd_app/build/ipad-screenshots/**
+    - gzd_app/build/ipad-screenshots.zip
+    - gzd_app/build/ios/simulator/xcodebuild-screenshots.log
+    - gzd_app/build/ios/simulator/Build/Products/Debug-iphonesimulator/*.app
+    - /tmp/xcodebuild_logs/*.log
