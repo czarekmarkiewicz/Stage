@@ -1,4 +1,253 @@
 workflows:
+  android-apk-manual-from-zip:
+    name: Stage GZD - Android APK (manual install, no publish)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      node: 22
+      java: 21
+      android_signing:
+      - gzd_android_keystore
+      vars:
+        ZIP_FILE: stage-gzd-capacitor-v2.9.0.zip
+        APP_DIR: gzd_app
+        ANDROID_VERSION_NAME: 2.9.0
+    scripts:
+    - name: Unpack ZIP
+      script: |
+        rm -rf unzip_tmp "$APP_DIR"
+        mkdir -p unzip_tmp "$APP_DIR"
+
+        if [ ! -f "$ZIP_FILE" ]; then
+          echo "Nie znaleziono pliku ZIP: $ZIP_FILE"
+          echo "Wrzuć plik $ZIP_FILE do repozytorium obok codemagic.yaml albo zmień ZIP_FILE w vars."
+          exit 1
+        fi
+
+        unzip -q "$ZIP_FILE" -d unzip_tmp
+
+        PACKAGE_JSON=$(find unzip_tmp -maxdepth 4 -name package.json | head -n 1)
+
+        if [ -z "$PACKAGE_JSON" ]; then
+          echo "Nie znaleziono package.json w ZIP."
+          exit 1
+        fi
+
+        SOURCE_DIR=$(dirname "$PACKAGE_JSON")
+        echo "Source directory: $SOURCE_DIR"
+
+        rsync -a "$SOURCE_DIR"/ "$APP_DIR"/
+        echo "APP_DIR=$APP_DIR" >> "$CM_ENV"
+
+        echo "Zawartość katalogu aplikacji:"
+        ls -la "$APP_DIR"
+    - name: Install npm dependencies
+      script: |
+        cd "$APP_DIR"
+        npm config set registry https://registry.npmjs.org/
+        echo "Node: $(node --version)"
+        echo "npm: $(npm --version)"
+        echo "Registry: $(npm config get registry)"
+        npm ci --no-audit --no-fund --loglevel=info
+    - name: Build web assets
+      script: |
+        cd "$APP_DIR"
+        npm run build
+        npm run test:scroll-restore
+        npm run test:android-navigation
+    - name: Add Android Capacitor project if missing
+      script: |
+        cd "$APP_DIR"
+
+        if [ ! -d "android" ]; then
+          npx cap add android
+        fi
+    - name: Generate Android launcher icons
+      script: |
+        cd "$APP_DIR"
+
+        echo "Generating Android launcher icons from bundled assets."
+        chmod +x scripts/generate-native-icons-macos.sh
+        scripts/generate-native-icons-macos.sh
+
+        ls -la assets || true
+        ls -la android/app/src/main/res/mipmap-xxxhdpi || true
+    - name: Sync and patch Android project
+      script: |
+        cd "$APP_DIR"
+
+        npx cap sync android
+        node scripts/patch-android.js
+        npm run test:generated-android
+        npm run test:location
+    - name: Calculate automatic Android build number
+      script: |
+        cd "$APP_DIR"
+
+        AUTO_BUILD_NUMBER=$(python3 <<'PY'
+        from datetime import datetime, timezone
+
+        # 1 000 000 000 + liczba minut od 2026-01-01 UTC.
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        print(1000000000 + int((now - base).total_seconds() // 60))
+        PY
+        )
+
+        echo "ANDROID_VERSION_CODE=$AUTO_BUILD_NUMBER" >> "$CM_ENV"
+        echo "Automatic Android versionCode: $AUTO_BUILD_NUMBER"
+    - name: Configure Android version and signing
+      script: |
+        cd "$APP_DIR"
+
+        cat > android/keystore.properties <<EOF
+        storeFile=$CM_KEYSTORE_PATH
+        storePassword=$CM_KEYSTORE_PASSWORD
+        keyAlias=$CM_KEY_ALIAS
+        keyPassword=$CM_KEY_PASSWORD
+        EOF
+
+        python3 <<'PY'
+        from pathlib import Path
+        import os
+        import re
+        import sys
+
+        build_file = Path("android/app/build.gradle")
+
+        if not build_file.exists():
+            print("Nie znaleziono android/app/build.gradle")
+            sys.exit(1)
+
+        text = build_file.read_text()
+
+        version_code = os.environ.get("ANDROID_VERSION_CODE")
+        if not version_code:
+            from datetime import datetime, timezone
+            base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            version_code = str(1000000000 + int((now - base).total_seconds() // 60))
+
+        version_name = os.environ.get("ANDROID_VERSION_NAME", "1.1")
+
+        text = re.sub(r"versionCode\s+\d+", f"versionCode {version_code}", text)
+        text = re.sub(r'versionName\s+"[^"]+"', f'versionName "{version_name}"', text)
+
+        def find_matching_brace(source, open_brace_index):
+            depth = 0
+            for i in range(open_brace_index, len(source)):
+                ch = source[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            return -1
+
+        def find_block(source, block_name, start=0, end=None):
+            if end is None:
+                end = len(source)
+            pattern = re.compile(r"(^|\n)([ \t]*)" + re.escape(block_name) + r"\s*\{")
+            match = pattern.search(source, start, end)
+            if not match:
+                return None
+            open_index = source.find("{", match.start(), match.end())
+            close_index = find_matching_brace(source, open_index)
+            if close_index == -1:
+                return None
+            return {
+                "match_start": match.start(),
+                "match_end": match.end(),
+                "open": open_index,
+                "close": close_index,
+                "indent": match.group(2),
+            }
+
+        keystore_block = """def keystoreProperties = new Properties()
+        def keystorePropertiesFile = rootProject.file('keystore.properties')
+        if (keystorePropertiesFile.exists()) {
+            keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+        }
+
+        """
+
+        if "keystorePropertiesFile = rootProject.file('keystore.properties')" not in text:
+            plugins_block = find_block(text, "plugins")
+            if plugins_block:
+                insert_at = plugins_block["close"] + 1
+                text = text[:insert_at] + "\n\n" + keystore_block + text[insert_at:]
+            else:
+                text = keystore_block + text
+
+        android_block = find_block(text, "android")
+        if not android_block:
+            print("Nie znaleziono bloku android { ... } w build.gradle")
+            sys.exit(1)
+
+        android_body = text[android_block["open"] + 1:android_block["close"]]
+
+        if "signingConfigs {" not in android_body:
+            build_types = find_block(text, "buildTypes", android_block["open"], android_block["close"])
+            signing_configs_block = """    signingConfigs {
+                release {
+                    keyAlias keystoreProperties['keyAlias']
+                    keyPassword keystoreProperties['keyPassword']
+                    storeFile file(keystoreProperties['storeFile'])
+                    storePassword keystoreProperties['storePassword']
+                }
+            }
+
+        """
+            if build_types:
+                text = text[:build_types["match_start"] + 1] + signing_configs_block + text[build_types["match_start"] + 1:]
+            else:
+                insert_at = android_block["close"]
+                text = text[:insert_at] + "\n" + signing_configs_block + text[insert_at:]
+
+        android_block = find_block(text, "android")
+        build_types = find_block(text, "buildTypes", android_block["open"], android_block["close"])
+
+        if not build_types:
+            insert_at = android_block["close"]
+            text = text[:insert_at] + """
+            buildTypes {
+                release {
+                    signingConfig signingConfigs.release
+                    minifyEnabled false
+                    proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+                }
+            }
+        """ + text[insert_at:]
+        else:
+            release_block = find_block(text, "release", build_types["open"], build_types["close"])
+            if not release_block:
+                insert_at = build_types["open"] + 1
+                text = text[:insert_at] + """
+                release {
+                    signingConfig signingConfigs.release
+                    minifyEnabled false
+                    proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+                }
+        """ + text[insert_at:]
+            else:
+                release_body = text[release_block["open"] + 1:release_block["close"]]
+                if "signingConfig signingConfigs.release" not in release_body:
+                    insert_at = release_block["open"] + 1
+                    text = text[:insert_at] + "\n            signingConfig signingConfigs.release" + text[insert_at:]
+
+        build_file.write_text(text)
+        PY
+
+        echo "Android build.gradle po konfiguracji:"
+        grep -n "versionCode\|versionName\|signingConfig\|signingConfigs" android/app/build.gradle || true
+    - name: Build signed Android APK
+      script: |
+        cd "$APP_DIR/android"
+        chmod +x ./gradlew
+        ./gradlew assembleRelease
+    artifacts:
+    - gzd_app/android/app/build/outputs/apk/release/*.apk
   build-from-zip:
     name: Build Android + iOS from ZIP
     max_build_duration: 90
