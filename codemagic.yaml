@@ -13,6 +13,15 @@ workflows:
         APP_DIR: gzd_app
         ANDROID_VERSION_NAME: 2.9.0
     scripts:
+    - name: Check Android signing key fingerprint
+  script: |
+    echo "=== Android signing certificate ==="
+    keytool -list -v \
+      -keystore "$CM_KEYSTORE_PATH" \
+      -alias "$CM_KEY_ALIAS" \
+      -storepass "$CM_KEYSTORE_PASSWORD" \
+      -keypass "$CM_KEY_PASSWORD" \
+      | grep -E "Alias name:|SHA256:"
     - name: Unpack ZIP
       script: |
         rm -rf unzip_tmp "$APP_DIR"
