@@ -1,3 +1,4 @@
+workflows:
 - name: Install Android API 37 SDK
   script: |
     set -e
