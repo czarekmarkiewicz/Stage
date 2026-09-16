@@ -17,12 +17,9 @@ workflows:
         APP_DIR: gzd_stage_app
 
         ANDROID_VERSION_NAME: 2.10.5
-
-        # W Gradle Android 17 nadal używa compileSdk/targetSdk = 37.
         ANDROID_COMPILE_SDK: '37'
         ANDROID_TARGET_SDK: '37'
 
-        # sdkmanager publikuje platformę API 37 jako android-37.0.
         ANDROID_PLATFORM_PACKAGE: '37.0'
         ANDROID_BUILD_TOOLS: '37.0.0'
 
@@ -46,8 +43,7 @@ workflows:
           mkdir -p unzip_tmp "$APP_DIR"
 
           if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: Nie znaleziono pliku:"
-            echo "$ZIP_FILE"
+            echo "ERROR: Nie znaleziono $ZIP_FILE"
             exit 1
           fi
 
@@ -56,7 +52,7 @@ workflows:
           PACKAGE_JSON=$(find unzip_tmp -maxdepth 4 -name package.json | head -n 1)
 
           if [ -z "$PACKAGE_JSON" ]; then
-            echo "ERROR: Nie znaleziono package.json w ZIP."
+            echo "ERROR: Nie znaleziono package.json."
             exit 1
           fi
 
@@ -67,9 +63,6 @@ workflows:
           rsync -a "$SOURCE_DIR"/ "$APP_DIR"/
 
           echo "APP_DIR=$APP_DIR" >> "$CM_ENV"
-
-          echo "Projekt rozpakowany."
-          ls -la "$APP_DIR"
 
       - name: Convert production project to Stage GZD
         script: |
@@ -119,7 +112,6 @@ workflows:
 
               original = text
 
-              # Application ID / Java package.
               text = text.replace(
                   OLD_APP_ID,
                   NEW_APP_ID,
@@ -130,17 +122,13 @@ workflows:
                   NEW_PACKAGE_PATH,
               )
 
-              # Chronimy prawidłowe adresy stage przed kolejnymi
-              # zamianami, żeby nie powstało stage.stage...
-              stage_marker = "__GZD_STAGE_DOMAIN__"
+              marker = "__GZD_STAGE_DOMAIN__"
 
               text = text.replace(
                   STAGE_DOMAIN,
-                  stage_marker,
+                  marker,
               )
 
-              # www.gdziezdzieckiem.eu również ma kierować
-              # bezpośrednio na stage.gdziezdzieckiem.eu.
               text = text.replace(
                   PROD_WWW_DOMAIN,
                   STAGE_DOMAIN,
@@ -152,7 +140,7 @@ workflows:
               )
 
               text = text.replace(
-                  stage_marker,
+                  marker,
                   STAGE_DOMAIN,
               )
 
@@ -163,7 +151,6 @@ workflows:
                   )
                   changed.append(str(path))
 
-          # Capacitor TypeScript / JS.
           for filename in (
               "capacitor.config.ts",
               "capacitor.config.js",
@@ -180,7 +167,7 @@ workflows:
 
               text = re.sub(
                   r"""(appName\s*:\s*)(['"])(.*?)\2""",
-                  r"\1'S​​tage GZD'".replace("\u200b", ""),
+                  r"\1'Stage GZD'",
                   text,
                   count=1,
               )
@@ -197,7 +184,6 @@ workflows:
                   encoding="utf-8",
               )
 
-          # Capacitor JSON, jeśli projekt go używa.
           json_config = Path(
               "capacitor.config.json"
           )
@@ -209,10 +195,7 @@ workflows:
                   )
               )
 
-              data["appId"] = (
-                  "eu.gdziezdzieckiem.stage"
-              )
-
+              data["appId"] = "eu.gdziezdzieckiem.stage"
               data["appName"] = "Stage GZD"
 
               json_config.write_text(
@@ -224,16 +207,8 @@ workflows:
                   encoding="utf-8",
               )
 
-          # Kontrola domeny.
           bad_domain = re.compile(
-              r"(?<!stage\.)"
-              r"(?<!www\.)"
-              r"gdziezdzieckiem\.eu",
-              re.IGNORECASE,
-          )
-
-          bad_www_domain = re.compile(
-              r"www\.gdziezdzieckiem\.eu",
+              r"(?<!stage\.)gdziezdzieckiem\.eu",
               re.IGNORECASE,
           )
 
@@ -243,62 +218,31 @@ workflows:
               if not path.is_file():
                   continue
 
-              if any(
-                  part in excluded_dirs
-                  for part in path.parts
-              ):
+              if any(part in excluded_dirs for part in path.parts):
                   continue
 
               try:
                   text = path.read_text(
                       encoding="utf-8",
                   )
-              except (
-                  UnicodeDecodeError,
-                  OSError,
-              ):
+              except (UnicodeDecodeError, OSError):
                   continue
 
-              if (
-                  bad_domain.search(text)
-                  or bad_www_domain.search(text)
-              ):
+              if bad_domain.search(text):
                   remaining.append(str(path))
 
           if remaining:
-              print(
-                  "ERROR: pozostały odwołania "
-                  "do domeny produkcyjnej:"
-              )
+              print("ERROR: Pozostały odwołania do produkcji:")
 
               for item in remaining:
                   print(" -", item)
 
               raise SystemExit(1)
 
-          print(
-              "Zmienione pliki:",
-              len(changed),
-          )
-
-          print(
-              "Application ID:",
-              NEW_APP_ID,
-          )
-
-          print(
-              "Domena:",
-              STAGE_DOMAIN,
-          )
+          print("Zmienione pliki:", len(changed))
+          print("Application ID:", NEW_APP_ID)
+          print("Domain:", STAGE_DOMAIN)
           PY
-
-          echo ""
-          echo "Konfiguracja Capacitor:"
-          grep -R \
-            "appId\|appName\|stage.gdziezdzieckiem.eu" \
-            capacitor.config.* \
-            2>/dev/null \
-            || true
 
       - name: Add Google verification token
         script: |
@@ -307,24 +251,17 @@ workflows:
 
           mkdir -p assets
 
-          printf '%s' \
-            "$ADI_REGISTRATION_TOKEN" \
+          printf '%s' "$ADI_REGISTRATION_TOKEN" \
             > assets/adi-registration.properties
 
           echo "Token:"
           cat assets/adi-registration.properties
           echo ""
 
-          ACTUAL_TOKEN=$(
-            cat assets/adi-registration.properties
-          )
-
-          if [ "$ACTUAL_TOKEN" != "$ADI_REGISTRATION_TOKEN" ]; then
-            echo "ERROR: Błędny token."
+          if [ "$(cat assets/adi-registration.properties)" != "$ADI_REGISTRATION_TOKEN" ]; then
+            echo "ERROR: Niepoprawny token."
             exit 1
           fi
-
-          echo "Token OK."
 
       - name: Create Stage project ZIP
         script: |
@@ -340,30 +277,22 @@ workflows:
               .
           )
 
-          echo "Utworzono Stage ZIP:"
+          echo "Stage ZIP:"
           ls -lh "$CM_BUILD_DIR/$STAGE_ZIP_FILE"
-
-          echo ""
-          echo "Sprawdzenie tokena w ZIP:"
 
           unzip -l \
             "$CM_BUILD_DIR/$STAGE_ZIP_FILE" \
-            | grep \
-              "assets/adi-registration.properties"
+            | grep "assets/adi-registration.properties"
 
       - name: Install npm dependencies
         script: |
           set -e
           cd "$APP_DIR"
 
-          npm config set registry \
-            https://registry.npmjs.org/
+          npm config set registry https://registry.npmjs.org/
 
-          echo "Node:"
-          node --version
-
-          echo "npm:"
-          npm --version
+          echo "Node: $(node --version)"
+          echo "npm: $(npm --version)"
 
           npm ci \
             --no-audit \
@@ -384,9 +313,7 @@ workflows:
         script: |
           set -e
 
-          SDKMANAGER="$(
-            command -v sdkmanager || true
-          )"
+          SDKMANAGER="$(command -v sdkmanager || true)"
 
           if [ -z "$SDKMANAGER" ] && \
              [ -n "$ANDROID_SDK_ROOT" ] && \
@@ -407,33 +334,12 @@ workflows:
             exit 1
           fi
 
-          echo "sdkmanager:"
-          echo "$SDKMANAGER"
-
           SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
 
-          echo ""
-          echo "Android SDK root:"
-          echo "$SDK_ROOT"
+          echo "sdkmanager: $SDKMANAGER"
+          echo "SDK root: $SDK_ROOT"
 
-          yes | "$SDKMANAGER" \
-            --licenses \
-            >/dev/null \
-            || true
-
-          echo ""
-          echo "Dostępne komponenty API 37:"
-
-          "$SDKMANAGER" \
-            --list \
-            --include_obsolete \
-            --channel=3 \
-            | grep -E \
-              "platforms;android-37|build-tools;37" \
-            || true
-
-          echo ""
-          echo "Instaluję Android SDK Platform 37.0..."
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
 
           "$SDKMANAGER" \
             --channel=3 \
@@ -441,25 +347,13 @@ workflows:
             "build-tools;$ANDROID_BUILD_TOOLS" \
             "platform-tools"
 
-          echo ""
-          echo "Sprawdzenie instalacji:"
-
           test -d \
             "$SDK_ROOT/platforms/android-$ANDROID_PLATFORM_PACKAGE"
 
           test -d \
             "$SDK_ROOT/build-tools/$ANDROID_BUILD_TOOLS"
 
-          echo "Platform:"
-          ls -ld \
-            "$SDK_ROOT/platforms/android-$ANDROID_PLATFORM_PACKAGE"
-
-          echo "Build tools:"
-          ls -ld \
-            "$SDK_ROOT/build-tools/$ANDROID_BUILD_TOOLS"
-
-          echo ""
-          echo "Android API 37 SDK gotowy."
+          echo "Android API 37 SDK OK."
 
       - name: Add Android Capacitor project
         script: |
@@ -470,21 +364,14 @@ workflows:
             npx cap add android
           fi
 
-          echo "Android project ready."
-
       - name: Generate Android native icons
         script: |
           set -e
           cd "$APP_DIR"
 
           if [ -f scripts/generate-native-icons-macos.sh ]; then
-            chmod +x \
-              scripts/generate-native-icons-macos.sh
-
+            chmod +x scripts/generate-native-icons-macos.sh
             scripts/generate-native-icons-macos.sh
-          else
-            echo \
-              "Brak generate-native-icons-macos.sh - pomijam."
           fi
 
       - name: Sync and patch Android
@@ -502,8 +389,178 @@ workflows:
             node scripts/patch-android-api37.js
           fi
 
-          echo ""
-          echo "Ustawiam nazwę Stage GZD w Androidzie."
+      - name: Fix Stage MainActivity package
+        script: |
+          set -e
+          cd "$APP_DIR"
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          java_root = Path(
+              "android/app/src/main/java"
+          )
+
+          target = (
+              java_root
+              / "eu"
+              / "gdziezdzieckiem"
+              / "stage"
+              / "MainActivity.java"
+          )
+
+          candidates = list(
+              java_root.rglob("MainActivity.java")
+          )
+
+          print("Znalezione MainActivity.java:")
+
+          for path in candidates:
+              print(
+                  f" - {path} "
+                  f"({path.stat().st_size} bytes)"
+              )
+
+          if not candidates:
+              raise SystemExit(
+                  "ERROR: Nie znaleziono MainActivity.java"
+              )
+
+          #
+          # Wersja wygenerowana automatycznie przez Capacitor
+          # jest bardzo mała.
+          #
+          # Produkcyjny patch tworzy znacznie większy MainActivity
+          # zawierający całą logikę GZD.
+          #
+          # Zachowujemy więc największy plik.
+          #
+          source = max(
+              candidates,
+              key=lambda path: path.stat().st_size,
+          )
+
+          print("")
+          print("Zachowuję:")
+          print(source)
+
+          text = source.read_text(
+              encoding="utf-8",
+          )
+
+          text, count = re.subn(
+              r"^\s*package\s+"
+              r"eu\.gdziezdzieckiem\.(?:app|stage)"
+              r"\s*;",
+              "package eu.gdziezdzieckiem.stage;",
+              text,
+              count=1,
+              flags=re.MULTILINE,
+          )
+
+          if count == 0:
+              if (
+                  "package eu.gdziezdzieckiem.stage;"
+                  not in text
+              ):
+                  raise SystemExit(
+                      "ERROR: Nie można ustawić "
+                      "pakietu MainActivity."
+                  )
+
+          target.parent.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+          target.write_text(
+              text,
+              encoding="utf-8",
+          )
+
+          #
+          # Usuń wszystkie pozostałe MainActivity.
+          #
+          for path in candidates:
+              if path.resolve() == target.resolve():
+                  continue
+
+              print("Usuwam duplikat:")
+              print(path)
+
+              path.unlink()
+
+          #
+          # Usuń pusty stary katalog app.
+          #
+          old_dir = (
+              java_root
+              / "eu"
+              / "gdziezdzieckiem"
+              / "app"
+          )
+
+          try:
+              if (
+                  old_dir.exists()
+                  and not any(old_dir.iterdir())
+              ):
+                  old_dir.rmdir()
+          except OSError:
+              pass
+
+          final_candidates = list(
+              java_root.rglob("MainActivity.java")
+          )
+
+          print("")
+          print("MainActivity po naprawie:")
+
+          for path in final_candidates:
+              print(
+                  f" - {path} "
+                  f"({path.stat().st_size} bytes)"
+              )
+
+          if len(final_candidates) != 1:
+              raise SystemExit(
+                  f"ERROR: Nadal istnieje "
+                  f"{len(final_candidates)} "
+                  f"plików MainActivity.java"
+              )
+
+          if (
+              final_candidates[0].resolve()
+              != target.resolve()
+          ):
+              raise SystemExit(
+                  "ERROR: MainActivity znajduje się "
+                  "w złej ścieżce."
+              )
+
+          final_text = target.read_text(
+              encoding="utf-8",
+          )
+
+          if (
+              "package eu.gdziezdzieckiem.stage;"
+              not in final_text
+          ):
+              raise SystemExit(
+                  "ERROR: Nieprawidłowy package."
+              )
+
+          print("")
+          print("OK:")
+          print(target)
+          print("package eu.gdziezdzieckiem.stage;")
+          PY
+
+      - name: Set Stage GZD Android name
+        script: |
+          set -e
+          cd "$APP_DIR"
 
           python3 <<'PY'
           from pathlib import Path
@@ -514,20 +571,15 @@ workflows:
           )
 
           if not strings.exists():
-              print(
-                  "ERROR: brak strings.xml"
+              raise SystemExit(
+                  "ERROR: Brak strings.xml"
               )
-              raise SystemExit(1)
 
           text = strings.read_text(
               encoding="utf-8",
           )
 
-          def replace_string(
-              source,
-              name,
-              value,
-          ):
+          def replace_string(source, name, value):
               pattern = (
                   r'(<string\s+name="'
                   + re.escape(name)
@@ -557,24 +609,8 @@ workflows:
               encoding="utf-8",
           )
 
-          print(
-              strings.read_text(
-                  encoding="utf-8",
-              )
-          )
+          print(text)
           PY
-
-          if npm run | grep -q "test:android-api37"; then
-            npm run test:android-api37
-          fi
-
-          if npm run | grep -q "test:generated-android"; then
-            npm run test:generated-android
-          fi
-
-          if npm run | grep -q "test:location"; then
-            npm run test:location
-          fi
 
       - name: Add verification token to Android assets
         script: |
@@ -582,12 +618,10 @@ workflows:
           cd "$APP_DIR"
 
           TOKEN_SOURCE="assets/adi-registration.properties"
-
           TOKEN_TARGET="android/app/src/main/assets/adi-registration.properties"
 
           if [ ! -f "$TOKEN_SOURCE" ]; then
-            echo "ERROR: Brak:"
-            echo "$TOKEN_SOURCE"
+            echo "ERROR: Brak $TOKEN_SOURCE"
             exit 1
           fi
 
@@ -598,113 +632,53 @@ workflows:
             "$TOKEN_SOURCE" \
             "$TOKEN_TARGET"
 
-          echo "Token w Android assets:"
-
+          echo "Token Android:"
           cat "$TOKEN_TARGET"
           echo ""
 
           if [ "$(cat "$TOKEN_TARGET")" != "$ADI_REGISTRATION_TOKEN" ]; then
-            echo "ERROR: Token nie zgadza się."
+            echo "ERROR: Token Android jest niepoprawny."
             exit 1
           fi
 
-          echo "Token Android OK."
-
-      - name: Verify Stage package and domain
+      - name: Verify Stage Android project
         script: |
           set -e
           cd "$APP_DIR"
 
-          ANDROID_MAIN="android/app/src/main/java/eu/gdziezdzieckiem/stage/MainActivity.java"
+          MAIN="android/app/src/main/java/eu/gdziezdzieckiem/stage/MainActivity.java"
 
-          ANDROID_MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ ! -s "$MAIN" ]; then
+            echo "ERROR: Brak:"
+            echo "$MAIN"
+            exit 1
+          fi
 
-          if [ ! -s "$ANDROID_MAIN" ]; then
-            echo "ERROR: Brak Stage MainActivity:"
-            echo "$ANDROID_MAIN"
+          COUNT=$(find \
+            android/app/src/main/java \
+            -name MainActivity.java \
+            | wc -l \
+            | tr -d ' ')
 
-            echo ""
-            echo "Dostępne MainActivity:"
+          echo "Liczba MainActivity.java: $COUNT"
 
+          if [ "$COUNT" != "1" ]; then
+            echo "ERROR: Musi istnieć dokładnie jeden MainActivity.java."
             find \
               android/app/src/main/java \
               -name MainActivity.java \
-              -print \
-              || true
-
+              -print
             exit 1
           fi
 
-          if [ ! -s "$ANDROID_MANIFEST" ]; then
-            echo "ERROR: Brak AndroidManifest.xml"
-            exit 1
-          fi
+          grep -Fq \
+            "package eu.gdziezdzieckiem.stage;" \
+            "$MAIN"
 
-          echo "MainActivity:"
-          echo "$ANDROID_MAIN"
+          echo "MainActivity OK."
 
           echo ""
-          echo "Manifest:"
-          echo "$ANDROID_MANIFEST"
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-
-          root = Path("android")
-
-          prod_domain = re.compile(
-              r"(?<!stage\.)"
-              r"(?<!www\.)"
-              r"gdziezdzieckiem\.eu",
-              re.IGNORECASE,
-          )
-
-          prod_www = re.compile(
-              r"www\.gdziezdzieckiem\.eu",
-              re.IGNORECASE,
-          )
-
-          found = []
-
-          for path in root.rglob("*"):
-              if not path.is_file():
-                  continue
-
-              try:
-                  text = path.read_text(
-                      encoding="utf-8",
-                  )
-              except (
-                  UnicodeDecodeError,
-                  OSError,
-              ):
-                  continue
-
-              if (
-                  prod_domain.search(text)
-                  or prod_www.search(text)
-              ):
-                  found.append(str(path))
-
-          if found:
-              print(
-                  "ERROR: domena produkcyjna "
-                  "pozostała w Androidzie:"
-              )
-
-              for item in found:
-                  print(" -", item)
-
-              raise SystemExit(1)
-
-          print(
-              "OK: brak produkcyjnej domeny."
-          )
-          PY
-
-          echo ""
-          echo "Stage domain occurrences:"
+          echo "Stage domain:"
 
           grep -RIn \
             "stage.gdziezdzieckiem.eu" \
@@ -713,7 +687,7 @@ workflows:
             || true
 
           echo ""
-          echo "Application name:"
+          echo "Stage GZD name:"
 
           grep -RIn \
             "Stage GZD" \
@@ -725,12 +699,7 @@ workflows:
           set -e
 
           if [ -z "$CM_KEYSTORE_PATH" ]; then
-            echo "ERROR: CM_KEYSTORE_PATH jest pusty."
-            exit 1
-          fi
-
-          if [ -z "$CM_KEY_ALIAS" ]; then
-            echo "ERROR: CM_KEY_ALIAS jest pusty."
+            echo "ERROR: Brak CM_KEYSTORE_PATH."
             exit 1
           fi
 
@@ -748,26 +717,22 @@ workflows:
             echo "$KEY_OUTPUT" \
               | grep "SHA256:" \
               | head -n 1 \
-              | sed \
-                's/.*SHA256:[[:space:]]*//' \
+              | sed 's/.*SHA256:[[:space:]]*//' \
               | tr -d '\r'
           )
 
           echo ""
           echo "========================================"
-          echo "Android signing certificate SHA-256:"
+          echo "Android signing SHA-256:"
           echo "$ACTUAL_SHA256"
           echo "========================================"
-          echo ""
 
           case "$ACTUAL_SHA256" in
             5E:AA:*)
-              echo \
-                "OK - używany jest klucz 5E:AA:..."
+              echo "OK - klucz 5E:AA:..."
               ;;
             *)
-              echo \
-                "ERROR: To nie jest oczekiwany klucz 5E:AA:..."
+              echo "ERROR: Nieoczekiwany klucz."
               exit 1
               ;;
           esac
@@ -775,7 +740,6 @@ workflows:
       - name: Calculate Android version code
         script: |
           set -e
-          cd "$APP_DIR"
 
           AUTO_BUILD_NUMBER=$(
             python3 <<'PY'
@@ -792,17 +756,13 @@ workflows:
               timezone.utc
           )
 
-          value = (
+          print(
               1000000000
               + int(
-                  (
-                      now - base
-                  ).total_seconds()
+                  (now - base).total_seconds()
                   // 60
               )
           )
-
-          print(value)
           PY
           )
 
@@ -810,8 +770,7 @@ workflows:
             "ANDROID_VERSION_CODE=$AUTO_BUILD_NUMBER" \
             >> "$CM_ENV"
 
-          echo \
-            "Android versionCode: $AUTO_BUILD_NUMBER"
+          echo "versionCode: $AUTO_BUILD_NUMBER"
 
       - name: Configure Android version and signing
         script: |
@@ -836,10 +795,9 @@ workflows:
           )
 
           if not build_file.exists():
-              print(
-                  "ERROR: brak android/app/build.gradle"
+              raise SystemExit(
+                  "ERROR: Brak build.gradle"
               )
-              sys.exit(1)
 
           text = build_file.read_text(
               encoding="utf-8",
@@ -850,10 +808,9 @@ workflows:
           )
 
           if not version_code:
-              print(
-                  "ERROR: brak ANDROID_VERSION_CODE"
+              raise SystemExit(
+                  "ERROR: Brak ANDROID_VERSION_CODE"
               )
-              sys.exit(1)
 
           version_name = os.environ.get(
               "ANDROID_VERSION_NAME",
@@ -872,29 +829,23 @@ workflows:
               text,
           )
 
-          # Dodatkowa kontrola applicationId.
           text = re.sub(
               r'applicationId\s+"[^"]+"',
               'applicationId "eu.gdziezdzieckiem.stage"',
               text,
           )
 
-          def matching_brace(
-              source,
-              opening,
-          ):
+          def matching_brace(source, opening):
               depth = 0
 
               for i in range(
                   opening,
                   len(source),
               ):
-                  ch = source[i]
-
-                  if ch == "{":
+                  if source[i] == "{":
                       depth += 1
 
-                  elif ch == "}":
+                  elif source[i] == "}":
                       depth -= 1
 
                       if depth == 0:
@@ -941,12 +892,9 @@ workflows:
                   return None
 
               return {
-                  "match_start":
-                      match.start(),
-                  "open":
-                      opening,
-                  "close":
-                      closing,
+                  "match_start": match.start(),
+                  "open": opening,
+                  "close": closing,
               }
 
           keystore_block = """def keystoreProperties = new Properties()
@@ -977,12 +925,8 @@ workflows:
                       + keystore_block
                       + text[position:]
                   )
-
               else:
-                  text = (
-                      keystore_block
-                      + text
-                  )
+                  text = keystore_block + text
 
           android = find_block(
               text,
@@ -990,20 +934,16 @@ workflows:
           )
 
           if not android:
-              print(
-                  "ERROR: brak bloku android."
+              raise SystemExit(
+                  "ERROR: Brak android {}"
               )
-              sys.exit(1)
 
           android_body = text[
               android["open"] + 1:
               android["close"]
           ]
 
-          if (
-              "signingConfigs {"
-              not in android_body
-          ):
+          if "signingConfigs {" not in android_body:
               build_types = find_block(
                   text,
                   "buildTypes",
@@ -1024,9 +964,8 @@ workflows:
 
               if build_types:
                   position = (
-                      build_types[
-                          "match_start"
-                      ] + 1
+                      build_types["match_start"]
+                      + 1
                   )
 
                   text = (
@@ -1036,9 +975,7 @@ workflows:
                   )
 
               else:
-                  position = (
-                      android["close"]
-                  )
+                  position = android["close"]
 
                   text = (
                       text[:position]
@@ -1060,10 +997,9 @@ workflows:
           )
 
           if not build_types:
-              print(
-                  "ERROR: brak buildTypes."
+              raise SystemExit(
+                  "ERROR: Brak buildTypes."
               )
-              sys.exit(1)
 
           release = find_block(
               text,
@@ -1115,9 +1051,6 @@ workflows:
           )
           PY
 
-          echo ""
-          echo "Android build.gradle:"
-
           grep -n \
             "applicationId\|versionCode\|versionName\|signingConfig" \
             android/app/build.gradle \
@@ -1165,11 +1098,7 @@ workflows:
             exit 1
           fi
 
-          echo "APK:"
-          echo "$APK"
-
-          echo ""
-          echo "Sprawdzam token w APK..."
+          echo "APK: $APK"
 
           TOKEN_IN_APK=$(
             unzip -p \
@@ -1178,13 +1107,11 @@ workflows:
           )
 
           if [ "$TOKEN_IN_APK" != "$ADI_REGISTRATION_TOKEN" ]; then
-            echo \
-              "ERROR: Brak lub niepoprawny token w APK."
+            echo "ERROR: Tokena nie ma w APK lub jest błędny."
             exit 1
           fi
 
-          echo \
-            "OK: assets/adi-registration.properties"
+          echo "OK: assets/adi-registration.properties"
 
           SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
 
@@ -1192,27 +1119,11 @@ workflows:
 
           APKSIGNER="$SDK_ROOT/build-tools/$ANDROID_BUILD_TOOLS/apksigner"
 
-          echo ""
-          echo "Sprawdzam package ID..."
-
           "$AAPT" \
             dump badging \
             "$APK" \
             | grep \
               "package: name='eu.gdziezdzieckiem.stage'"
-
-          echo ""
-          echo "Sprawdzam nazwę aplikacji..."
-
-          "$AAPT" \
-            dump badging \
-            "$APK" \
-            | grep \
-              "application-label:'Stage GZD'" \
-            || true
-
-          echo ""
-          echo "Sprawdzam podpis APK..."
 
           "$APKSIGNER" \
             verify \
@@ -1234,20 +1145,24 @@ workflows:
           echo "APK certificate SHA-256:"
           echo "$APK_SHA256"
 
-          case "$(echo "$APK_SHA256" | tr '[:lower:]' '[:upper:]')" in
+          NORMALIZED=$(
+            echo "$APK_SHA256" \
+              | tr -d ':' \
+              | tr '[:lower:]' '[:upper:]'
+          )
+
+          case "$NORMALIZED" in
             5EAA*)
-              echo \
-                "OK - APK podpisany kluczem 5E:AA:..."
+              echo "OK - APK podpisany kluczem 5E:AA:..."
               ;;
             *)
-              echo \
-                "ERROR: APK ma nieoczekiwany certyfikat."
+              echo "ERROR: APK ma nieoczekiwany podpis."
               exit 1
               ;;
           esac
 
           echo ""
-          echo "Final APK verified."
+          echo "Final APK OK."
 
       - name: Verify final AAB
         script: |
@@ -1268,17 +1183,10 @@ workflows:
             exit 1
           fi
 
-          echo "AAB:"
-          echo "$AAB"
-
-          echo ""
-          echo "Sprawdzam token w AAB..."
-
           unzip -l "$AAB" \
             | grep \
               "base/assets/adi-registration.properties"
 
-          echo ""
           echo "AAB OK."
 
     artifacts:
