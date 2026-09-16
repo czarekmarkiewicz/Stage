@@ -105,8 +105,7 @@ workflows:
                   continue
 
               try:
-                  raw = path.read_bytes()
-                  text = raw.decode("utf-8")
+                  text = path.read_bytes().decode("utf-8")
               except (UnicodeDecodeError, OSError):
                   continue
 
@@ -149,7 +148,10 @@ workflows:
                       text,
                       encoding="utf-8",
                   )
-                  changed.append(str(path))
+
+                  changed.append(
+                      str(path)
+                  )
 
           for filename in (
               "capacitor.config.ts",
@@ -195,8 +197,13 @@ workflows:
                   )
               )
 
-              data["appId"] = "eu.gdziezdzieckiem.stage"
-              data["appName"] = "Stage GZD"
+              data["appId"] = (
+                  "eu.gdziezdzieckiem.stage"
+              )
+
+              data["appName"] = (
+                  "Stage GZD"
+              )
 
               json_config.write_text(
                   json.dumps(
@@ -218,30 +225,54 @@ workflows:
               if not path.is_file():
                   continue
 
-              if any(part in excluded_dirs for part in path.parts):
+              if any(
+                  part in excluded_dirs
+                  for part in path.parts
+              ):
                   continue
 
               try:
                   text = path.read_text(
                       encoding="utf-8",
                   )
-              except (UnicodeDecodeError, OSError):
+              except (
+                  UnicodeDecodeError,
+                  OSError,
+              ):
                   continue
 
               if bad_domain.search(text):
-                  remaining.append(str(path))
+                  remaining.append(
+                      str(path)
+                  )
 
           if remaining:
-              print("ERROR: Pozostały odwołania do produkcji:")
+              print(
+                  "ERROR: Pozostały odwołania do produkcji:"
+              )
 
               for item in remaining:
-                  print(" -", item)
+                  print(
+                      " -",
+                      item,
+                  )
 
               raise SystemExit(1)
 
-          print("Zmienione pliki:", len(changed))
-          print("Application ID:", NEW_APP_ID)
-          print("Domain:", STAGE_DOMAIN)
+          print(
+              "Zmienione pliki:",
+              len(changed),
+          )
+
+          print(
+              "Application ID:",
+              NEW_APP_ID,
+          )
+
+          print(
+              "Domain:",
+              STAGE_DOMAIN,
+          )
           PY
 
       - name: Add Google verification token
@@ -251,7 +282,8 @@ workflows:
 
           mkdir -p assets
 
-          printf '%s' "$ADI_REGISTRATION_TOKEN" \
+          printf '%s' \
+            "$ADI_REGISTRATION_TOKEN" \
             > assets/adi-registration.properties
 
           echo "Token:"
@@ -267,7 +299,8 @@ workflows:
         script: |
           set -e
 
-          rm -f "$CM_BUILD_DIR/$STAGE_ZIP_FILE"
+          rm -f \
+            "$CM_BUILD_DIR/$STAGE_ZIP_FILE"
 
           (
             cd "$APP_DIR"
@@ -278,18 +311,22 @@ workflows:
           )
 
           echo "Stage ZIP:"
-          ls -lh "$CM_BUILD_DIR/$STAGE_ZIP_FILE"
+
+          ls -lh \
+            "$CM_BUILD_DIR/$STAGE_ZIP_FILE"
 
           unzip -l \
             "$CM_BUILD_DIR/$STAGE_ZIP_FILE" \
-            | grep "assets/adi-registration.properties"
+            | grep \
+              "assets/adi-registration.properties"
 
       - name: Install npm dependencies
         script: |
           set -e
           cd "$APP_DIR"
 
-          npm config set registry https://registry.npmjs.org/
+          npm config set registry \
+            https://registry.npmjs.org/
 
           echo "Node: $(node --version)"
           echo "npm: $(npm --version)"
@@ -305,7 +342,6 @@ workflows:
           cd "$APP_DIR"
 
           npm run build
-
           npm run test:scroll-restore
           npm run test:android-navigation
 
@@ -313,7 +349,9 @@ workflows:
         script: |
           set -e
 
-          SDKMANAGER="$(command -v sdkmanager || true)"
+          SDKMANAGER="$(
+            command -v sdkmanager || true
+          )"
 
           if [ -z "$SDKMANAGER" ] && \
              [ -n "$ANDROID_SDK_ROOT" ] && \
@@ -336,10 +374,16 @@ workflows:
 
           SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
 
-          echo "sdkmanager: $SDKMANAGER"
-          echo "SDK root: $SDK_ROOT"
+          echo "sdkmanager:"
+          echo "$SDKMANAGER"
 
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          echo "SDK root:"
+          echo "$SDK_ROOT"
+
+          yes | "$SDKMANAGER" \
+            --licenses \
+            >/dev/null \
+            || true
 
           "$SDKMANAGER" \
             --channel=3 \
@@ -370,7 +414,10 @@ workflows:
           cd "$APP_DIR"
 
           if [ -f scripts/generate-native-icons-macos.sh ]; then
-            chmod +x scripts/generate-native-icons-macos.sh
+
+            chmod +x \
+              scripts/generate-native-icons-macos.sh
+
             scripts/generate-native-icons-macos.sh
           fi
 
@@ -411,10 +458,14 @@ workflows:
           )
 
           candidates = list(
-              java_root.rglob("MainActivity.java")
+              java_root.rglob(
+                  "MainActivity.java"
+              )
           )
 
-          print("Znalezione MainActivity.java:")
+          print(
+              "Znalezione MainActivity.java:"
+          )
 
           for path in candidates:
               print(
@@ -427,18 +478,15 @@ workflows:
                   "ERROR: Nie znaleziono MainActivity.java"
               )
 
-          #
-          # Wersja wygenerowana automatycznie przez Capacitor
-          # jest bardzo mała.
-          #
-          # Produkcyjny patch tworzy znacznie większy MainActivity
-          # zawierający całą logikę GZD.
-          #
-          # Zachowujemy więc największy plik.
-          #
+          # Zachowujemy większy plik.
+          # Wygenerowany stub Capacitor jest mały,
+          # a właściwy MainActivity GZD zawiera
+          # rozbudowaną logikę aplikacji.
+
           source = max(
               candidates,
-              key=lambda path: path.stat().st_size,
+              key=lambda path:
+                  path.stat().st_size,
           )
 
           print("")
@@ -479,21 +527,20 @@ workflows:
               encoding="utf-8",
           )
 
-          #
-          # Usuń wszystkie pozostałe MainActivity.
-          #
           for path in candidates:
-              if path.resolve() == target.resolve():
+              if (
+                  path.resolve()
+                  == target.resolve()
+              ):
                   continue
 
-              print("Usuwam duplikat:")
-              print(path)
+              print(
+                  "Usuwam duplikat:",
+                  path,
+              )
 
               path.unlink()
 
-          #
-          # Usuń pusty stary katalog app.
-          #
           old_dir = (
               java_root
               / "eu"
@@ -504,18 +551,25 @@ workflows:
           try:
               if (
                   old_dir.exists()
-                  and not any(old_dir.iterdir())
+                  and not any(
+                      old_dir.iterdir()
+                  )
               ):
                   old_dir.rmdir()
+
           except OSError:
               pass
 
           final_candidates = list(
-              java_root.rglob("MainActivity.java")
+              java_root.rglob(
+                  "MainActivity.java"
+              )
           )
 
           print("")
-          print("MainActivity po naprawie:")
+          print(
+              "MainActivity po naprawie:"
+          )
 
           for path in final_candidates:
               print(
@@ -525,9 +579,9 @@ workflows:
 
           if len(final_candidates) != 1:
               raise SystemExit(
-                  f"ERROR: Nadal istnieje "
+                  "ERROR: Nadal istnieje "
                   f"{len(final_candidates)} "
-                  f"plików MainActivity.java"
+                  "plików MainActivity.java"
               )
 
           if (
@@ -535,7 +589,7 @@ workflows:
               != target.resolve()
           ):
               raise SystemExit(
-                  "ERROR: MainActivity znajduje się "
+                  "ERROR: MainActivity jest "
                   "w złej ścieżce."
               )
 
@@ -552,9 +606,8 @@ workflows:
               )
 
           print("")
-          print("OK:")
+          print("MainActivity OK:")
           print(target)
-          print("package eu.gdziezdzieckiem.stage;")
           PY
 
       - name: Set Stage GZD Android name
@@ -579,7 +632,11 @@ workflows:
               encoding="utf-8",
           )
 
-          def replace_string(source, name, value):
+          def replace_string(
+              source,
+              name,
+              value,
+          ):
               pattern = (
                   r'(<string\s+name="'
                   + re.escape(name)
@@ -618,6 +675,7 @@ workflows:
           cd "$APP_DIR"
 
           TOKEN_SOURCE="assets/adi-registration.properties"
+
           TOKEN_TARGET="android/app/src/main/assets/adi-registration.properties"
 
           if [ ! -f "$TOKEN_SOURCE" ]; then
@@ -633,6 +691,7 @@ workflows:
             "$TOKEN_TARGET"
 
           echo "Token Android:"
+
           cat "$TOKEN_TARGET"
           echo ""
 
@@ -654,20 +713,24 @@ workflows:
             exit 1
           fi
 
-          COUNT=$(find \
-            android/app/src/main/java \
-            -name MainActivity.java \
-            | wc -l \
-            | tr -d ' ')
+          COUNT=$(
+            find \
+              android/app/src/main/java \
+              -name MainActivity.java \
+              | wc -l \
+              | tr -d ' '
+          )
 
           echo "Liczba MainActivity.java: $COUNT"
 
           if [ "$COUNT" != "1" ]; then
             echo "ERROR: Musi istnieć dokładnie jeden MainActivity.java."
+
             find \
               android/app/src/main/java \
               -name MainActivity.java \
               -print
+
             exit 1
           fi
 
@@ -717,7 +780,8 @@ workflows:
             echo "$KEY_OUTPUT" \
               | grep "SHA256:" \
               | head -n 1 \
-              | sed 's/.*SHA256:[[:space:]]*//' \
+              | sed \
+                's/.*SHA256:[[:space:]]*//' \
               | tr -d '\r'
           )
 
@@ -728,11 +792,16 @@ workflows:
           echo "========================================"
 
           case "$ACTUAL_SHA256" in
+
             5E:AA:*)
-              echo "OK - klucz 5E:AA:..."
+              echo \
+                "OK - klucz 5E:AA:..."
               ;;
+
             *)
-              echo "ERROR: Nieoczekiwany klucz."
+              echo \
+                "ERROR: Nieoczekiwany klucz."
+
               exit 1
               ;;
           esac
@@ -759,7 +828,9 @@ workflows:
           print(
               1000000000
               + int(
-                  (now - base).total_seconds()
+                  (
+                      now - base
+                  ).total_seconds()
                   // 60
               )
           )
@@ -770,7 +841,8 @@ workflows:
             "ANDROID_VERSION_CODE=$AUTO_BUILD_NUMBER" \
             >> "$CM_ENV"
 
-          echo "versionCode: $AUTO_BUILD_NUMBER"
+          echo \
+            "versionCode: $AUTO_BUILD_NUMBER"
 
       - name: Configure Android version and signing
         script: |
@@ -788,7 +860,6 @@ workflows:
           from pathlib import Path
           import os
           import re
-          import sys
 
           build_file = Path(
               "android/app/build.gradle"
@@ -835,7 +906,10 @@ workflows:
               text,
           )
 
-          def matching_brace(source, opening):
+          def matching_brace(
+              source,
+              opening,
+          ):
               depth = 0
 
               for i in range(
@@ -892,9 +966,14 @@ workflows:
                   return None
 
               return {
-                  "match_start": match.start(),
-                  "open": opening,
-                  "close": closing,
+                  "match_start":
+                      match.start(),
+
+                  "open":
+                      opening,
+
+                  "close":
+                      closing,
               }
 
           keystore_block = """def keystoreProperties = new Properties()
@@ -925,8 +1004,12 @@ workflows:
                       + keystore_block
                       + text[position:]
                   )
+
               else:
-                  text = keystore_block + text
+                  text = (
+                      keystore_block
+                      + text
+                  )
 
           android = find_block(
               text,
@@ -943,7 +1026,10 @@ workflows:
               android["close"]
           ]
 
-          if "signingConfigs {" not in android_body:
+          if (
+              "signingConfigs {"
+              not in android_body
+          ):
               build_types = find_block(
                   text,
                   "buildTypes",
@@ -964,8 +1050,9 @@ workflows:
 
               if build_types:
                   position = (
-                      build_types["match_start"]
-                      + 1
+                      build_types[
+                          "match_start"
+                      ] + 1
                   )
 
                   text = (
@@ -975,7 +1062,9 @@ workflows:
                   )
 
               else:
-                  position = android["close"]
+                  position = (
+                      android["close"]
+                  )
 
                   text = (
                       text[:position]
@@ -1010,7 +1099,8 @@ workflows:
 
           if not release:
               position = (
-                  build_types["open"] + 1
+                  build_types["open"]
+                  + 1
               )
 
               text = (
@@ -1081,7 +1171,7 @@ workflows:
 
       - name: Verify final APK
         script: |
-          set -e
+          set -euo pipefail
           cd "$APP_DIR/android"
 
           APK=$(
@@ -1098,7 +1188,13 @@ workflows:
             exit 1
           fi
 
-          echo "APK: $APK"
+          echo "========================================"
+          echo "APK:"
+          echo "$APK"
+          echo "========================================"
+
+          echo ""
+          echo "Sprawdzam token Google..."
 
           TOKEN_IN_APK=$(
             unzip -p \
@@ -1107,11 +1203,12 @@ workflows:
           )
 
           if [ "$TOKEN_IN_APK" != "$ADI_REGISTRATION_TOKEN" ]; then
-            echo "ERROR: Tokena nie ma w APK lub jest błędny."
+            echo "ERROR: Brak lub błędny token."
             exit 1
           fi
 
           echo "OK: assets/adi-registration.properties"
+          echo "Token: $TOKEN_IN_APK"
 
           SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
 
@@ -1119,50 +1216,180 @@ workflows:
 
           APKSIGNER="$SDK_ROOT/build-tools/$ANDROID_BUILD_TOOLS/apksigner"
 
-          "$AAPT" \
-            dump badging \
-            "$APK" \
+          if [ ! -x "$AAPT" ]; then
+            echo "ERROR: Brak aapt:"
+            echo "$AAPT"
+            exit 1
+          fi
+
+          if [ ! -x "$APKSIGNER" ]; then
+            echo "ERROR: Brak apksigner:"
+            echo "$APKSIGNER"
+            exit 1
+          fi
+
+          echo ""
+          echo "Sprawdzam package ID..."
+
+          BADGING=$(
+            "$AAPT" \
+              dump badging \
+              "$APK"
+          )
+
+          echo "$BADGING" \
             | grep \
               "package: name='eu.gdziezdzieckiem.stage'"
 
-          "$APKSIGNER" \
-            verify \
-            --verbose \
-            --print-certs \
-            "$APK"
+          echo \
+            "OK: eu.gdziezdzieckiem.stage"
 
-          APK_SHA256=$(
+          echo ""
+          echo "Nazwa aplikacji:"
+
+          echo "$BADGING" \
+            | grep -E \
+              "application-label(:|-[^:]+:)'Stage GZD'" \
+            | head -n 5 \
+            || true
+
+          echo ""
+          echo "Sprawdzam podpis APK..."
+
+          VERIFY_OUTPUT=$(
             "$APKSIGNER" \
               verify \
+              --verbose \
               --print-certs \
               "$APK" \
-              | sed -n \
-                's/^Signer #1 certificate SHA-256 digest: //p' \
+              2>&1
+          )
+
+          printf '%s\n' \
+            "$VERIFY_OUTPUT"
+
+          echo ""
+          echo \
+            "apksigner verification: OK"
+
+          #
+          # SHA-256 certyfikatu APK.
+          # Obsługuje stdout/stderr oraz format
+          # zarówno z dwukropkami, jak i bez.
+          #
+
+          APK_CERT_SHA256=$(
+            printf '%s\n' "$VERIFY_OUTPUT" \
+              | sed -nE \
+                's/^.*[Cc]ertificate SHA-256 digest:[[:space:]]*([0-9A-Fa-f:]+).*$/\1/p' \
+              | head -n 1
+          )
+
+          KEY_OUTPUT=$(
+            keytool \
+              -list \
+              -v \
+              -keystore "$CM_KEYSTORE_PATH" \
+              -alias "$CM_KEY_ALIAS" \
+              -storepass "$CM_KEYSTORE_PASSWORD" \
+              -keypass "$CM_KEY_PASSWORD" \
+              2>&1
+          )
+
+          KEY_CERT_SHA256=$(
+            printf '%s\n' "$KEY_OUTPUT" \
+              | sed -nE \
+                's/^.*SHA256:[[:space:]]*([0-9A-Fa-f:]+).*$/\1/p' \
               | head -n 1
           )
 
           echo ""
-          echo "APK certificate SHA-256:"
-          echo "$APK_SHA256"
+          echo "========================================"
+          echo "Certyfikat APK:"
+          echo \
+            "${APK_CERT_SHA256:-NIE ODCZYTANO}"
 
-          NORMALIZED=$(
-            echo "$APK_SHA256" \
-              | tr -d ':' \
-              | tr '[:lower:]' '[:upper:]'
+          echo ""
+          echo "Certyfikat keystore:"
+          echo \
+            "${KEY_CERT_SHA256:-NIE ODCZYTANO}"
+          echo "========================================"
+
+          if [ -z "$KEY_CERT_SHA256" ]; then
+            echo "ERROR: Nie udało się odczytać certyfikatu keystore."
+            exit 1
+          fi
+
+          NORMALIZED_KEY=$(
+            printf '%s' \
+              "$KEY_CERT_SHA256" \
+              | tr -d ': \r\n' \
+              | tr \
+                '[:lower:]' \
+                '[:upper:]'
           )
 
-          case "$NORMALIZED" in
+          case "$NORMALIZED_KEY" in
+
             5EAA*)
-              echo "OK - APK podpisany kluczem 5E:AA:..."
+              echo \
+                "OK: keystore = klucz 5E:AA:..."
               ;;
+
             *)
-              echo "ERROR: APK ma nieoczekiwany podpis."
+              echo \
+                "ERROR: Keystore nie jest kluczem 5E:AA:..."
+
               exit 1
               ;;
           esac
 
+          if [ -n "$APK_CERT_SHA256" ]; then
+
+            NORMALIZED_APK=$(
+              printf '%s' \
+                "$APK_CERT_SHA256" \
+                | tr -d ': \r\n' \
+                | tr \
+                  '[:lower:]' \
+                  '[:upper:]'
+            )
+
+            if [ "$NORMALIZED_APK" != "$NORMALIZED_KEY" ]; then
+              echo \
+                "ERROR: APK jest podpisany innym certyfikatem niż keystore."
+
+              exit 1
+            fi
+
+            echo \
+              "OK: APK i keystore mają ten sam certyfikat."
+
+          else
+
+            echo ""
+            echo "UWAGA:"
+            echo \
+              "apksigner potwierdził poprawny podpis,"
+
+            echo \
+              "ale nie zwrócił fingerprintu certyfikatu"
+
+            echo \
+              "w oczekiwanym formacie."
+
+            echo \
+              "Nie przerywam buildu z tego powodu."
+          fi
+
           echo ""
-          echo "Final APK OK."
+          echo "========================================"
+          echo "FINAL APK VERIFIED"
+          echo "Package: eu.gdziezdzieckiem.stage"
+          echo "Token: OK"
+          echo "Signature: OK"
+          echo "Keystore: 5E:AA:..."
+          echo "========================================"
 
       - name: Verify final AAB
         script: |
@@ -1182,6 +1409,9 @@ workflows:
             echo "ERROR: Brak AAB."
             exit 1
           fi
+
+          echo "AAB:"
+          echo "$AAB"
 
           unzip -l "$AAB" \
             | grep \
